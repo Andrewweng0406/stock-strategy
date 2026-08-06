@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     default_max_loss_usd: float = 250.0
     database_url: str = "sqlite+aiosqlite:///./trading_copilot.db"
     redis_url: str | None = "redis://127.0.0.1:6379/0"
-    cache_ttl_seconds: int = 300
+    cache_ttl_seconds: int = 30
     moomoo_enabled: bool = True
     moomoo_host: str = "127.0.0.1"
     moomoo_port: int = 11111
@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # warm with real data, without ever sending Moomoo credentials to the cloud.
     cloud_sync_url: str | None = None
     sync_token: str | None = None
+    # How often the local instance re-fetches + pushes each actively-viewed
+    # ticker/expiry. Kept well above 1-2s on purpose: a full GEX recompute
+    # walks the entire option chain, and polling that fast risks tripping
+    # Moomoo/Futu API rate limits on a real brokerage connection.
+    sync_poll_seconds: int = 10
+    # How long a ticker/expiry stays "active" (and gets polled) after the
+    # local frontend last asked for it.
+    active_window_seconds: int = 300
 
     @property
     def allowed_cors_origins(self) -> list[str]:

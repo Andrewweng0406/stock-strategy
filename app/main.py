@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -84,13 +85,14 @@ async def lifespan(app: FastAPI):
         if settings.cloud_sync_url and settings.sync_token
         else None
     )
+    gex_service = GEXService(
+        market_data, cache, settings.cache_ttl_seconds, cloud_sync
+    )
     app.state.services = AppServices(
         engine=engine,
         cache=cache,
         market_data=market_data,
-        gex_service=GEXService(
-            market_data, cache, settings.cache_ttl_seconds, cloud_sync
-        ),
+        gex_service=gex_service,
         plan_repository=PlanRepository(session_factory),
         llm=LLMOrchestrator(
             openai_client,
@@ -98,9 +100,22 @@ async def lifespan(app: FastAPI):
             settings.default_max_loss_usd,
         ),
     )
+    poller_task = (
+        asyncio.create_task(
+            gex_service.run_poller(
+                settings.sync_poll_seconds, settings.active_window_seconds
+            )
+        )
+        if cloud_sync
+        else None
+    )
     try:
         yield
     finally:
+        if poller_task:
+            poller_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await poller_task
         await cache.close()
         if openai_client:
             await openai_client.close()
