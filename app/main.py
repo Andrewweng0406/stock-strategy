@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
 from app.analytics import GEXCalculator, parse_gex_risk_profile
 from app.cache import ResilientCache
 from app.config import settings
-from app.database import Base, PlanRepository
+from app.database import Base, ChatRepository, PlanRepository, ProfileRepository
 from app.market_data import (
     FallbackMarketDataClient,
     MockMarketDataClient,
@@ -28,11 +28,16 @@ from app.market_data import (
 from app.models import (
     ChatRequest,
     ChatResponse,
+    ConversationList,
+    ConversationMessages,
     ExpirationList,
     HealthResponse,
     OptionGEXSummary,
+    PlanList,
     SavePlanRequest,
     SyncGexRequest,
+    UserProfile,
+    UserProfileUpdate,
     UserTradePlan,
 )
 from app.services import CloudSync, GEXService, LLMOrchestrator
@@ -51,6 +56,8 @@ class AppServices:
     market_data: FallbackMarketDataClient
     gex_service: GEXService
     plan_repository: PlanRepository
+    chat_repository: ChatRepository
+    profile_repository: ProfileRepository
     llm: LLMOrchestrator
 
 
@@ -101,6 +108,8 @@ async def lifespan(app: FastAPI):
         market_data=market_data,
         gex_service=gex_service,
         plan_repository=PlanRepository(session_factory),
+        chat_repository=ChatRepository(session_factory),
+        profile_repository=ProfileRepository(session_factory),
         llm=LLMOrchestrator(
             openai_client,
             settings.openai_model,
@@ -185,8 +194,25 @@ async def chat(payload: ChatRequest, services: Services) -> ChatResponse:
     risk = parse_gex_risk_profile(
         summary, payload.context.days_to_expiration
     )
+    profile = await services.profile_repository.get_profile(
+        payload.context.user_id
+    )
     assistant_message, trade_plan = await services.llm.chat(
-        payload, summary, risk
+        payload, summary, risk, profile
+    )
+    await services.chat_repository.save_message(
+        payload.context.conversation_id,
+        payload.context.user_id,
+        payload.context.ticker,
+        "user",
+        payload.user_message,
+    )
+    await services.chat_repository.save_message(
+        payload.context.conversation_id,
+        payload.context.user_id,
+        payload.context.ticker,
+        "assistant",
+        assistant_message,
     )
     return ChatResponse(
         assistant_message=assistant_message,
@@ -194,6 +220,41 @@ async def chat(payload: ChatRequest, services: Services) -> ChatResponse:
         risk_profile=risk,
         trade_plan_card=trade_plan,
     )
+
+
+@app.get("/api/v1/conversations", response_model=ConversationList)
+async def list_conversations(user_id: str, services: Services) -> ConversationList:
+    conversations = await services.chat_repository.list_conversations(user_id)
+    return ConversationList(conversations=conversations)
+
+
+@app.get(
+    "/api/v1/conversations/{conversation_id}/messages",
+    response_model=ConversationMessages,
+)
+async def get_conversation_messages(
+    conversation_id: str, user_id: str, services: Services
+) -> ConversationMessages:
+    return await services.chat_repository.get_messages(conversation_id, user_id)
+
+
+@app.get("/api/v1/plans", response_model=PlanList)
+async def list_plans(user_id: str, services: Services) -> PlanList:
+    plans = await services.plan_repository.list_plans(user_id)
+    return PlanList(plans=plans)
+
+
+@app.get("/api/v1/profile/{user_id}", response_model=UserProfile)
+async def get_profile(user_id: str, services: Services) -> UserProfile:
+    profile = await services.profile_repository.get_profile(user_id)
+    return profile or UserProfile(user_id=user_id)
+
+
+@app.put("/api/v1/profile/{user_id}", response_model=UserProfile)
+async def update_profile(
+    user_id: str, payload: UserProfileUpdate, services: Services
+) -> UserProfile:
+    return await services.profile_repository.upsert_profile(user_id, payload)
 
 
 @app.post("/api/v1/sync/gex")

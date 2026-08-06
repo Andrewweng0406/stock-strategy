@@ -14,6 +14,7 @@ from app.models import (
     PlanStatus,
     RiskProfile,
     TradePlanToolArguments,
+    UserProfile,
     UserTradePlan,
 )
 
@@ -241,13 +242,15 @@ class LLMOrchestrator:
         }
 
     @staticmethod
-    def _infer_profile(text: str) -> ProfileName:
+    def _infer_profile(text: str, saved_default: ProfileName | None = None) -> ProfileName:
         lowered = text.lower()
         if any(value in lowered for value in ("保守", "conservative", "option a", "選 a", "选 a")):
             return "CONSERVATIVE"
         if any(value in lowered for value in ("激進", "激进", "aggressive", "option c", "選 c", "选 c")):
             return "AGGRESSIVE"
-        return "BALANCED"
+        if any(value in lowered for value in ("中性", "balanced", "option b", "選 b", "选 b")):
+            return "BALANCED"
+        return saved_default or "BALANCED"
 
     @staticmethod
     def _has_explicit_profile_selection(text: str) -> bool:
@@ -266,6 +269,7 @@ class LLMOrchestrator:
         summary: OptionGEXSummary,
         risk: RiskProfile,
         days_to_expiration: int,
+        profile: UserProfile | None = None,
     ) -> str:
         context = json.dumps(
             {
@@ -274,6 +278,11 @@ class LLMOrchestrator:
                 "days_to_expiration": days_to_expiration,
                 "calculated_strategy_profiles": self._automatic_defaults(
                     summary, days_to_expiration
+                ),
+                "user_profile": (
+                    profile.model_dump(mode="json", exclude={"user_id", "updated_at"})
+                    if profile
+                    else None
                 ),
             },
             ensure_ascii=True,
@@ -315,6 +324,11 @@ precise, probability-aware advice from the authoritative market context below.
    explicitly supplied overrides during refinement.
 10. User-facing prose must be concise bullet points and at most 200 characters.
     Prioritize R/R, theta daily-loss proxy, and the key GEX support/resistance.
+11. If user_profile.risk_tolerance is set and this message does not itself state
+    an explicit risk preference, default the first recommendation to the
+    matching profile letter (CONSERVATIVE→A, BALANCED→B, AGGRESSIVE→C) and
+    say briefly that it's based on their saved preference. An explicit
+    preference in the message always overrides the saved one.
 </behavior_rules>
 """.strip()
 
@@ -366,6 +380,7 @@ precise, probability-aware advice from the authoritative market context below.
         summary: OptionGEXSummary,
         bias: StrategyBias,
         days_to_expiration: int,
+        saved_risk_tolerance: ProfileName | None = None,
     ) -> str:
         profiles = self._strategy_profiles(
             summary, bias, days_to_expiration
@@ -398,12 +413,19 @@ precise, probability-aware advice from the authoritative market context below.
                 if bias == "BULLISH"
                 else "定義風險"
             )
+            marker = (
+                "★"
+                if saved_risk_tolerance and key == saved_risk_tolerance.lower()
+                else ""
+            )
             lines.append(
-                f"- {label}{structure} E{profile['entry_price']:.1f} "
+                f"- {label}{marker}{structure} E{profile['entry_price']:.1f} "
                 f"S{profile['stop_loss']:.1f} T{profile['target_price']:.1f} "
                 f"RR{profile['reward_to_risk_ratio']:.2f} "
                 f"θ${profile['theta_daily_loss_estimate_usd']:.1f}/d*"
             )
+        if saved_risk_tolerance:
+            lines.append("- ★已套用你的偏好設定")
         return "\n".join(lines)
 
     async def chat(
@@ -411,6 +433,7 @@ precise, probability-aware advice from the authoritative market context below.
         payload: ChatRequest,
         summary: OptionGEXSummary,
         risk: RiskProfile,
+        profile: UserProfile | None = None,
     ) -> tuple[str, UserTradePlan | None]:
         if self.client is None:
             raise HTTPException(503, "OPENAI_API_KEY is not configured")
@@ -428,7 +451,7 @@ precise, probability-aware advice from the authoritative market context below.
             response = await self.client.responses.create(
                 model=self.model,
                 instructions=self._instructions(
-                    summary, risk, context.days_to_expiration
+                    summary, risk, context.days_to_expiration, profile
                 ),
                 input=input_items,
                 tools=[self._tool()],
@@ -464,9 +487,10 @@ precise, probability-aware advice from the authoritative market context below.
                 arguments.strategy_type, payload.user_message
             )
             profile_name = self._infer_profile(
-                f"{payload.user_message} {arguments.strategy_type}"
+                f"{payload.user_message} {arguments.strategy_type}",
+                saved_default=profile.risk_tolerance if profile else None,
             )
-            profile = self._strategy_profiles(
+            strategy_profile = self._strategy_profiles(
                 summary, bias, context.days_to_expiration
             )[profile_name.lower()]
             explicit_profile = self._has_explicit_profile_selection(
@@ -481,29 +505,29 @@ precise, probability-aware advice from the authoritative market context below.
                 conversation_id=context.conversation_id,
                 ticker=context.ticker.strip().upper(),
                 strategy_type=(
-                    profile["strategy_type"]
+                    strategy_profile["strategy_type"]
                     if explicit_profile
                     else arguments.strategy_type
                 ),
                 entry_price=(
                     arguments.entry_price
                     if use_user_levels
-                    else profile["entry_price"]
+                    else strategy_profile["entry_price"]
                 ),
                 stop_loss=(
                     arguments.stop_loss
                     if use_user_levels
-                    else profile["stop_loss"]
+                    else strategy_profile["stop_loss"]
                 ),
                 target_price=(
                     arguments.target_price
                     if use_user_levels
-                    else profile["target_price"]
+                    else strategy_profile["target_price"]
                 ),
                 max_loss_usd=(
                     arguments.max_loss_usd
                     if use_user_levels
-                    else profile["max_loss_usd"]
+                    else strategy_profile["max_loss_usd"]
                 ),
                 theta_warning=arguments.theta_warning or risk.locked_warning,
                 status=PlanStatus.DRAFT,
@@ -515,7 +539,7 @@ precise, probability-aware advice from the authoritative market context below.
                         bias,
                         trade_plan,
                         risk,
-                        profile["theta_daily_loss_estimate_usd"],
+                        strategy_profile["theta_daily_loss_estimate_usd"],
                     )
                 ),
                 trade_plan,
@@ -533,6 +557,7 @@ precise, probability-aware advice from the authoritative market context below.
                         summary,
                         proposal_bias,
                         context.days_to_expiration,
+                        profile.risk_tolerance if profile else None,
                     )
                 ),
                 None,

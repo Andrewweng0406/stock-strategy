@@ -126,3 +126,47 @@ class SyncGexRequest(StrictModel):
 class HealthResponse(StrictModel):
     status: str
     market_data_mode: str
+
+
+class ChatMessageRecord(StrictModel):
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+
+
+class ConversationSummary(StrictModel):
+    conversation_id: str
+    ticker: str | None = None
+    last_message: str
+    last_message_at: datetime
+    message_count: int
+
+
+class ConversationList(StrictModel):
+    conversations: list[ConversationSummary]
+
+
+class ConversationMessages(StrictModel):
+    conversation_id: str
+    messages: list[ChatMessageRecord]
+
+
+class PlanList(StrictModel):
+    plans: list[UserTradePlan]
+
+
+RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
+
+
+class UserProfile(StrictModel):
+    user_id: str
+    risk_tolerance: RiskTolerance | None = None
+    preferred_strategy_types: list[str] = Field(default_factory=list)
+    notes: str = Field(default="", max_length=2000)
+    updated_at: datetime | None = None
+
+
+class UserProfileUpdate(StrictModel):
+    risk_tolerance: RiskTolerance | None = None
+    preferred_strategy_types: list[str] = Field(default_factory=list, max_length=10)
+    notes: str = Field(default="", max_length=2000)

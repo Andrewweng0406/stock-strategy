@@ -4,13 +4,17 @@ import {
   AlertTriangle,
   Calendar,
   CheckCircle2,
+  History,
   Mic,
+  Plus,
   PenTool,
   Send,
+  Settings,
   ShieldAlert,
   Smile,
   Target,
   Wifi,
+  X,
 } from "lucide-react";
 
 /**
@@ -333,6 +337,14 @@ export default function TradingTerminalNotebook() {
   const [mobileTab, setMobileTab] = useState("chat");
   const [planBadge, setPlanBadge] = useState(false);
 
+  // ---------- Phase 3: persistent memory ----------
+  const [conversations, setConversations] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [profile, setProfile] = useState({ risk_tolerance: null, preferred_strategy_types: [], notes: "" });
+  const [profileDraft, setProfileDraft] = useState({ risk_tolerance: null, strategyTypesInput: "", notes: "" });
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+
   const scrollRef = useRef(null);
   const isComposing = useRef(false);
 
@@ -345,7 +357,7 @@ export default function TradingTerminalNotebook() {
     }
     return id;
   });
-  const [conversationId] = useState(() => crypto.randomUUID());
+  const [conversationId, setConversationId] = useState(() => crypto.randomUUID());
 
   const selectedExpiration = expirations.find((e) => e.date === selectedDate) || null;
   const aggregateExpirations = expirations.slice(0, MAX_AGGREGATE_EXPIRATIONS);
@@ -453,6 +465,98 @@ export default function TradingTerminalNotebook() {
     else setTickerInput(ticker);
   }
 
+  function refreshConversations() {
+    fetch(`${BASE_URL}/api/v1/conversations?user_id=${userId}`)
+      .then((res) => (res.ok ? res.json() : { conversations: [] }))
+      .then((data) => setConversations(data.conversations || []))
+      .catch(() => {});
+  }
+
+  // ---------- Phase 3: load persisted history, plans, and profile once ----------
+  useEffect(() => {
+    refreshConversations();
+
+    fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`)
+      .then((res) => (res.ok ? res.json() : { plans: [] }))
+      .then((data) => {
+        const plans = (data.plans || []).map((p) => ({
+          strategy: p.strategy_type,
+          time: fmtDateTime(p.signed_at),
+        }));
+        if (plans.length) setJournal(plans);
+      })
+      .catch(() => {});
+
+    fetch(`${BASE_URL}/api/v1/profile/${userId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) return;
+        setProfile(data);
+        setProfileDraft({
+          risk_tolerance: data.risk_tolerance,
+          strategyTypesInput: (data.preferred_strategy_types || []).join(", "),
+          notes: data.notes || "",
+        });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function resumeConversation(conversationSummary) {
+    setShowHistory(false);
+    try {
+      const res = await fetch(
+        `${BASE_URL}/api/v1/conversations/${conversationSummary.conversation_id}/messages?user_id=${userId}`
+      );
+      if (!res.ok) throw new Error(await parseErrorDetail(res));
+      const data = await res.json();
+      setMessages((data.messages || []).map((m) => ({ role: m.role, content: m.content })));
+      setConversationId(conversationSummary.conversation_id);
+      setTradePlan(null);
+    } catch {
+      // Resuming is a convenience feature — a failed fetch just leaves the
+      // current chat state untouched rather than surfacing a hard error.
+    }
+  }
+
+  function startNewChat() {
+    setShowHistory(false);
+    setMessages([]);
+    setConversationId(crypto.randomUUID());
+    setTradePlan(null);
+  }
+
+  async function saveProfile() {
+    setProfileSaving(true);
+    try {
+      const res = await fetch(`${BASE_URL}/api/v1/profile/${userId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          risk_tolerance: profileDraft.risk_tolerance,
+          preferred_strategy_types: profileDraft.strategyTypesInput
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+          notes: profileDraft.notes,
+        }),
+      });
+      if (!res.ok) throw new Error(await parseErrorDetail(res));
+      const saved = await res.json();
+      setProfile(saved);
+      setProfileDraft({
+        risk_tolerance: saved.risk_tolerance,
+        strategyTypesInput: (saved.preferred_strategy_types || []).join(", "),
+        notes: saved.notes || "",
+      });
+      setShowProfile(false);
+    } catch {
+      // Best-effort — the draft stays open so the user can retry.
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
   // ---------- Chat ----------
   async function sendMessage(overrideText) {
     const text = (overrideText ?? input).trim();
@@ -483,6 +587,7 @@ export default function TradingTerminalNotebook() {
         setTradePlan(data.trade_plan_card);
         setPlanBadge(true);
       }
+      refreshConversations();
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -663,17 +768,76 @@ export default function TradingTerminalNotebook() {
         </section>
 
         {/* MIDDLE: AI CHAT */}
-        <section className={`${mobileTab === "chat" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden`}>
+        <section className={`${mobileTab === "chat" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden relative`}>
           <PaneHeader
             icon={<PenTool size={13} className="rotate-90" />}
             title="AI Copilot"
             trailing={
-              <span className="text-[10px] text-[#2fa37a] flex items-center gap-1.5">
-                <i className={`w-1.5 h-1.5 rounded-full bg-[#2fa37a] ${chatLoading ? "animate-pulse" : ""}`} />
-                {chatLoading ? "thinking…" : "reading left panel"}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] text-[#2fa37a] flex items-center gap-1.5">
+                  <i className={`w-1.5 h-1.5 rounded-full bg-[#2fa37a] ${chatLoading ? "animate-pulse" : ""}`} />
+                  {chatLoading ? "thinking…" : "reading left panel"}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={startNewChat}
+                    title="開始新對話"
+                    className="w-6 h-6 flex items-center justify-center rounded text-[#8d8d93] hover:text-[#f0ede5] hover:bg-[rgba(240,237,229,.08)] transition-colors"
+                  >
+                    <Plus size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowHistory((v) => !v);
+                      setShowProfile(false);
+                      refreshConversations();
+                    }}
+                    title="歷史對話"
+                    className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                      showHistory ? "text-[#c9a15c] bg-[rgba(201,161,92,.13)]" : "text-[#8d8d93] hover:text-[#f0ede5] hover:bg-[rgba(240,237,229,.08)]"
+                    }`}
+                  >
+                    <History size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowProfile((v) => !v);
+                      setShowHistory(false);
+                    }}
+                    title="交易偏好設定"
+                    className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                      showProfile ? "text-[#c9a15c] bg-[rgba(201,161,92,.13)]" : "text-[#8d8d93] hover:text-[#f0ede5] hover:bg-[rgba(240,237,229,.08)]"
+                    }`}
+                  >
+                    <Settings size={13} />
+                  </button>
+                </div>
+              </div>
             }
           />
+
+          {showHistory && (
+            <HistoryPanel
+              conversations={conversations}
+              activeConversationId={conversationId}
+              onSelect={resumeConversation}
+              onClose={() => setShowHistory(false)}
+            />
+          )}
+
+          {showProfile && (
+            <ProfilePanel
+              draft={profileDraft}
+              setDraft={setProfileDraft}
+              saving={profileSaving}
+              onSave={saveProfile}
+              onClose={() => setShowProfile(false)}
+            />
+          )}
+
           <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-3.5">
             {messages.length === 0 && (
               <div className="text-[11px] text-[#57575c] text-center mt-8 leading-relaxed">
@@ -930,6 +1094,116 @@ function BottomNavTab({ icon, label, active, badge, onClick }) {
       </span>
       {label}
     </button>
+  );
+}
+
+function HistoryPanel({ conversations, activeConversationId, onSelect, onClose }) {
+  return (
+    <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(240,237,229,.09)]">
+        <span className="text-[10px] tracking-wider uppercase text-[#8d8d93] font-semibold">歷史對話</span>
+        <button type="button" onClick={onClose} className="text-[#8d8d93] hover:text-[#f0ede5]">
+          <X size={14} />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-3 py-2.5 flex flex-col gap-1.5">
+        {conversations.length === 0 && (
+          <div className="text-[11px] text-[#57575c] text-center mt-8">尚無歷史對話</div>
+        )}
+        {conversations.map((c) => (
+          <button
+            key={c.conversation_id}
+            type="button"
+            onClick={() => onSelect(c)}
+            className={`text-left px-3 py-2.5 rounded-md border transition-colors ${
+              c.conversation_id === activeConversationId
+                ? "border-[rgba(201,161,92,.4)] bg-[rgba(201,161,92,.08)]"
+                : "border-[rgba(240,237,229,.09)] bg-[#1b1b1e] hover:border-[rgba(240,237,229,.2)]"
+            }`}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-bold text-[#f0ede5]">{c.ticker || "—"}</span>
+              <span className="text-[9.5px] text-[#57575c]">{fmtDateTime(c.last_message_at)}</span>
+            </div>
+            <div className="text-[10.5px] text-[#8d8d93] line-clamp-2 leading-snug">{c.last_message}</div>
+            <div className="text-[9px] text-[#57575c] mt-1">{c.message_count} 則訊息</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProfilePanel({ draft, setDraft, saving, onSave, onClose }) {
+  const options = [
+    { value: "CONSERVATIVE", label: "保守" },
+    { value: "BALANCED", label: "中性" },
+    { value: "AGGRESSIVE", label: "激進" },
+  ];
+  return (
+    <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(240,237,229,.09)]">
+        <span className="text-[10px] tracking-wider uppercase text-[#8d8d93] font-semibold">交易偏好設定</span>
+        <button type="button" onClick={onClose} className="text-[#8d8d93] hover:text-[#f0ede5]">
+          <X size={14} />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-[#57575c] mb-2">風險偏好</div>
+          <div className="flex gap-1.5">
+            {options.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() =>
+                  setDraft((d) => ({
+                    ...d,
+                    risk_tolerance: d.risk_tolerance === opt.value ? null : opt.value,
+                  }))
+                }
+                className={`flex-1 py-2 rounded-md text-[11.5px] font-semibold border transition-colors ${
+                  draft.risk_tolerance === opt.value
+                    ? "bg-[#c9a15c] text-[#1a1408] border-[#c9a15c]"
+                    : "border-[rgba(240,237,229,.09)] text-[#8d8d93] hover:text-[#f0ede5]"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-[#57575c] mb-2">常用策略（逗號分隔）</div>
+          <input
+            value={draft.strategyTypesInput}
+            onChange={(e) => setDraft((d) => ({ ...d, strategyTypesInput: e.target.value }))}
+            placeholder="例如：Put Bear Spread, Iron Condor"
+            className={`w-full bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2.5 py-2 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+          />
+        </div>
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-[#57575c] mb-2">備註</div>
+          <textarea
+            value={draft.notes}
+            onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
+            rows={4}
+            placeholder="任何想讓 AI 記住的偏好…"
+            className={`w-full bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2.5 py-2 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] resize-none ${MONO}`}
+          />
+        </div>
+      </div>
+      <div className="px-4 py-3 border-t border-[rgba(240,237,229,.09)]">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          className="w-full py-2.5 rounded-md bg-[#c9a15c] text-[#1a1408] text-[11.5px] font-bold uppercase tracking-wide hover:bg-[#d8b06c] disabled:opacity-50 transition-colors"
+        >
+          {saving ? "儲存中…" : "儲存偏好"}
+        </button>
+      </div>
+    </div>
   );
 }
 
