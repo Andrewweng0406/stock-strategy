@@ -7,8 +7,7 @@
     "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "vite preview --host 0.0.0.0 --port $PORT",
-    "postinstall": "ln -sf \"$(pwd)/node_modules\" \"$(pwd)/../node_modules\""
+    "start": "vite preview --host 0.0.0.0 --port $PORT"
   },
   "dependencies": {
     "lucide-react": "^0.469.0",
