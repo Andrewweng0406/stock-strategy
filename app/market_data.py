@@ -3,16 +3,31 @@ import hashlib
 import logging
 import math
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import pandas as pd
 
 from app.analytics import GEXCalculator, OptionContract
-from app.models import GEXStatus, OptionGEXSummary
+from app.models import ExpirationInfo, ExpirationType, GEXStatus, OptionGEXSummary
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_third_friday(value: date) -> bool:
+    return value.weekday() == 4 and 15 <= value.day <= 21
+
+
+def classify_expiration(value: date, today: date) -> ExpirationType:
+    dte = (value - today).days
+    if dte <= 0:
+        return ExpirationType.ZERO_DTE
+    if dte == 1:
+        return ExpirationType.ONE_DTE
+    if _is_third_friday(value):
+        return ExpirationType.MONTHLY
+    return ExpirationType.WEEKLY
 
 
 class MarketDataClient(ABC):
@@ -22,8 +37,29 @@ class MarketDataClient(ABC):
     ) -> OptionGEXSummary:
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_gex_summary_multi(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        raise NotImplementedError
+
 
 class MockMarketDataClient(MarketDataClient):
+    @staticmethod
+    def _next_fridays(start: date, count: int) -> list[date]:
+        current = start + timedelta(days=1)
+        while current.weekday() != 4:
+            current += timedelta(days=1)
+        fridays = []
+        for _ in range(count):
+            fridays.append(current)
+            current += timedelta(days=7)
+        return fridays
+
     async def get_gex_summary(
         self, ticker: str, days_to_expiration: int
     ) -> OptionGEXSummary:
@@ -45,6 +81,25 @@ class MockMarketDataClient(MarketDataClient):
             ),
         )
 
+    async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        today = datetime.now(timezone.utc).date()
+        dates = sorted({today, today + timedelta(days=1), *self._next_fridays(today, 8)})
+        return [
+            ExpirationInfo(
+                date=d,
+                days_to_expiration=max((d - today).days, 0),
+                expiration_type=classify_expiration(d, today),
+            )
+            for d in dates
+        ]
+
+    async def get_gex_summary_multi(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        base = await self.get_gex_summary(ticker, 30)
+        multiplier = max(len(expiration_dates), 1)
+        return base.model_copy(update={"net_gex": base.net_gex * multiplier})
+
 
 class MoomooMarketDataClient(MarketDataClient):
     def __init__(self, host: str, port: int, calculator: GEXCalculator) -> None:
@@ -65,29 +120,100 @@ class MoomooMarketDataClient(MarketDataClient):
         except (TypeError, ValueError):
             return default
 
+    def _quote_context(self):
+        from futu import OpenQuoteContext
+
+        return OpenQuoteContext(host=self.host, port=self.port)
+
+    def _stock_price_sync(self, quote_context: Any, code: str) -> float:
+        from futu import RET_OK
+
+        ret, stock_snapshot = quote_context.get_market_snapshot([code])
+        if ret != RET_OK or stock_snapshot.empty:
+            raise RuntimeError(f"Stock snapshot failed: {stock_snapshot}")
+        stock_price = self._number(stock_snapshot.iloc[0].get("last_price"))
+        if stock_price <= 0:
+            raise RuntimeError("OpenD returned an invalid stock price")
+        return stock_price
+
+    def _expiration_dates_sync(self, quote_context: Any, code: str) -> list[date]:
+        from futu import RET_OK
+
+        ret, expiration_data = quote_context.get_option_expiration_date(code=code)
+        if ret != RET_OK or expiration_data.empty:
+            raise RuntimeError(f"Expiration lookup failed: {expiration_data}")
+        dates = [
+            date.fromisoformat(str(value)[:10])
+            for value in expiration_data["strike_time"].tolist()
+            if str(value)
+        ]
+        return sorted(set(dates))
+
+    def _contracts_for_expiration_sync(
+        self, quote_context: Any, code: str, expiration: date
+    ) -> list[OptionContract]:
+        from futu import RET_OK
+
+        selected_text = expiration.isoformat()
+        ret, chain = quote_context.get_option_chain(
+            code=code, start=selected_text, end=selected_text
+        )
+        if ret != RET_OK or chain.empty:
+            raise RuntimeError(f"Option chain failed: {chain}")
+
+        option_codes = chain["code"].dropna().astype(str).tolist()
+        snapshots: list[pd.DataFrame] = []
+        for start in range(0, len(option_codes), 200):
+            ret, snapshot = quote_context.get_market_snapshot(
+                option_codes[start : start + 200]
+            )
+            if ret != RET_OK:
+                raise RuntimeError(f"Option snapshot failed: {snapshot}")
+            snapshots.append(snapshot)
+        if not snapshots:
+            return []
+
+        contracts: list[OptionContract] = []
+        for _, row in pd.concat(snapshots, ignore_index=True).iterrows():
+            raw_type = str(row.get("option_type", "")).upper()
+            option_type: Literal["CALL", "PUT"]
+            if "CALL" in raw_type:
+                option_type = "CALL"
+            elif "PUT" in raw_type:
+                option_type = "PUT"
+            else:
+                continue
+            strike = self._number(row.get("option_strike_price"))
+            open_interest = int(self._number(row.get("option_open_interest")))
+            contract_size = self._number(row.get("option_contract_size"), 100)
+            iv = self._number(row.get("option_implied_volatility"))
+            if iv > 3:
+                iv /= 100
+            if strike <= 0 or open_interest <= 0:
+                continue
+            contracts.append(
+                OptionContract(
+                    code=str(row.get("code", "")),
+                    option_type=option_type,
+                    strike=strike,
+                    expiration_date=expiration,
+                    implied_volatility=max(iv, 0.01),
+                    delta=self._number(row.get("option_delta")),
+                    market_gamma=self._number(row.get("option_gamma")),
+                    open_interest=open_interest,
+                    contract_size=contract_size if contract_size > 0 else 100,
+                )
+            )
+        return contracts
+
     def _fetch_sync(
         self, ticker: str, days_to_expiration: int
     ) -> OptionGEXSummary:
-        from futu import OpenQuoteContext, RET_OK
-
-        quote_context = OpenQuoteContext(host=self.host, port=self.port)
+        quote_context = self._quote_context()
         code = self._normalize_ticker(ticker)
         try:
-            ret, stock_snapshot = quote_context.get_market_snapshot([code])
-            if ret != RET_OK or stock_snapshot.empty:
-                raise RuntimeError(f"Stock snapshot failed: {stock_snapshot}")
-            stock_price = self._number(stock_snapshot.iloc[0].get("last_price"))
-            if stock_price <= 0:
-                raise RuntimeError("OpenD returned an invalid stock price")
-
-            ret, expiration_data = quote_context.get_option_expiration_date(code=code)
-            if ret != RET_OK or expiration_data.empty:
-                raise RuntimeError(f"Expiration lookup failed: {expiration_data}")
-            available_dates = [
-                date.fromisoformat(str(value)[:10])
-                for value in expiration_data["strike_time"].tolist()
-                if str(value)
-            ]
+            stock_price = self._stock_price_sync(quote_context, code)
+            available_dates = self._expiration_dates_sync(quote_context, code)
             today = datetime.now(timezone.utc).date()
             selected = min(
                 available_dates,
@@ -95,56 +221,46 @@ class MoomooMarketDataClient(MarketDataClient):
                     max((expiry - today).days, 0) - days_to_expiration
                 ),
             )
-            selected_text = selected.isoformat()
-            ret, chain = quote_context.get_option_chain(
-                code=code, start=selected_text, end=selected_text
+            contracts = self._contracts_for_expiration_sync(
+                quote_context, code, selected
             )
-            if ret != RET_OK or chain.empty:
-                raise RuntimeError(f"Option chain failed: {chain}")
-
-            option_codes = chain["code"].dropna().astype(str).tolist()
-            snapshots: list[pd.DataFrame] = []
-            for start in range(0, len(option_codes), 200):
-                ret, snapshot = quote_context.get_market_snapshot(
-                    option_codes[start : start + 200]
-                )
-                if ret != RET_OK:
-                    raise RuntimeError(f"Option snapshot failed: {snapshot}")
-                snapshots.append(snapshot)
-            if not snapshots:
+            if not contracts:
                 raise RuntimeError("Option chain did not contain contracts")
+            return self.calculator.calculate(ticker, stock_price, contracts)
+        finally:
+            quote_context.close()
 
+    def _fetch_expirations_sync(self, ticker: str) -> list[ExpirationInfo]:
+        quote_context = self._quote_context()
+        code = self._normalize_ticker(ticker)
+        try:
+            dates = self._expiration_dates_sync(quote_context, code)
+        finally:
+            quote_context.close()
+        today = datetime.now(timezone.utc).date()
+        return [
+            ExpirationInfo(
+                date=d,
+                days_to_expiration=max((d - today).days, 0),
+                expiration_type=classify_expiration(d, today),
+            )
+            for d in dates
+        ]
+
+    def _fetch_multi_sync(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        quote_context = self._quote_context()
+        code = self._normalize_ticker(ticker)
+        try:
+            stock_price = self._stock_price_sync(quote_context, code)
             contracts: list[OptionContract] = []
-            for _, row in pd.concat(snapshots, ignore_index=True).iterrows():
-                raw_type = str(row.get("option_type", "")).upper()
-                option_type: Literal["CALL", "PUT"]
-                if "CALL" in raw_type:
-                    option_type = "CALL"
-                elif "PUT" in raw_type:
-                    option_type = "PUT"
-                else:
-                    continue
-                strike = self._number(row.get("option_strike_price"))
-                open_interest = int(self._number(row.get("option_open_interest")))
-                contract_size = self._number(row.get("option_contract_size"), 100)
-                iv = self._number(row.get("option_implied_volatility"))
-                if iv > 3:
-                    iv /= 100
-                if strike <= 0 or open_interest <= 0:
-                    continue
-                contracts.append(
-                    OptionContract(
-                        code=str(row.get("code", "")),
-                        option_type=option_type,
-                        strike=strike,
-                        expiration_date=selected,
-                        implied_volatility=max(iv, 0.01),
-                        delta=self._number(row.get("option_delta")),
-                        market_gamma=self._number(row.get("option_gamma")),
-                        open_interest=open_interest,
-                        contract_size=contract_size if contract_size > 0 else 100,
-                    )
+            for expiration in expiration_dates:
+                contracts.extend(
+                    self._contracts_for_expiration_sync(quote_context, code, expiration)
                 )
+            if not contracts:
+                raise RuntimeError("Aggregate option chain did not contain contracts")
             return self.calculator.calculate(ticker, stock_price, contracts)
         finally:
             quote_context.close()
@@ -153,6 +269,16 @@ class MoomooMarketDataClient(MarketDataClient):
         self, ticker: str, days_to_expiration: int
     ) -> OptionGEXSummary:
         return await asyncio.to_thread(self._fetch_sync, ticker, days_to_expiration)
+
+    async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        return await asyncio.to_thread(self._fetch_expirations_sync, ticker)
+
+    async def get_gex_summary_multi(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        return await asyncio.to_thread(
+            self._fetch_multi_sync, ticker, expiration_dates
+        )
 
 
 class FallbackMarketDataClient(MarketDataClient):
@@ -182,3 +308,29 @@ class FallbackMarketDataClient(MarketDataClient):
             self.using_fallback = True
             logger.exception("Moomoo OpenD failed; using mock market data")
             return await self.fallback.get_gex_summary(ticker, days_to_expiration)
+
+    async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        try:
+            result = await self.primary.get_available_expirations(ticker)
+            self.using_fallback = False
+            return result
+        except Exception:
+            self.using_fallback = True
+            logger.exception("Moomoo OpenD failed; using mock expirations")
+            return await self.fallback.get_available_expirations(ticker)
+
+    async def get_gex_summary_multi(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        try:
+            result = await self.primary.get_gex_summary_multi(
+                ticker, expiration_dates
+            )
+            self.using_fallback = False
+            return result
+        except Exception:
+            self.using_fallback = True
+            logger.exception("Moomoo OpenD failed; using mock aggregate market data")
+            return await self.fallback.get_gex_summary_multi(
+                ticker, expiration_dates
+            )

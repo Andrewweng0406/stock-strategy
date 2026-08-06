@@ -3,6 +3,7 @@ import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import date
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -27,6 +28,7 @@ from app.market_data import (
 from app.models import (
     ChatRequest,
     ChatResponse,
+    ExpirationList,
     HealthResponse,
     OptionGEXSummary,
     SavePlanRequest,
@@ -155,6 +157,24 @@ async def get_gex(
     days_to_expiration: int = Query(default=30, ge=0, le=730),
 ) -> OptionGEXSummary:
     return await services.gex_service.get_summary(ticker, days_to_expiration)
+
+
+@app.get("/api/v1/expirations/{ticker}", response_model=ExpirationList)
+async def get_expirations(ticker: str, services: Services) -> ExpirationList:
+    expirations = await services.gex_service.get_expirations(ticker)
+    return ExpirationList(ticker=ticker.strip().upper(), expirations=expirations)
+
+
+@app.get("/api/v1/gex/{ticker}/aggregate", response_model=OptionGEXSummary)
+async def get_gex_aggregate(
+    ticker: str,
+    services: Services,
+    # Each expiration costs one get_option_chain call; Moomoo/Futu caps that
+    # endpoint at 10/30s, so this stays well under it even with other chain
+    # lookups (single-expiration views, the sync poller) landing nearby.
+    expirations: list[date] = Query(..., min_length=1, max_length=6),
+) -> OptionGEXSummary:
+    return await services.gex_service.get_aggregate_summary(ticker, expirations)
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)

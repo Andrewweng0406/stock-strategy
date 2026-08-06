@@ -35,18 +35,31 @@ const MONO =
 const SCRIPT =
   '[font-family:"Segoe_Script","Bradley_Hand","Noteworthy","Comic_Sans_MS",cursive]';
 
-const EXPIRIES = ["8/7", "8/14", "8/21", "9/18"];
-
 // Illustrative-only trend — the backend has no historical GEX endpoint yet.
 const DEMO_SPARK_VALUES = [1.8, 0.9, -0.3, -0.6, -1.4, -1.0, -2.1];
 
-function daysUntil(monthDay) {
-  const [month, day] = monthDay.split("/").map(Number);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let target = new Date(now.getFullYear(), month - 1, day);
-  if (target < today) target = new Date(now.getFullYear() + 1, month - 1, day);
-  return Math.round((target - today) / 86400000);
+// How many of the (potentially dozens of) real expirations the backend
+// returns get shown in the picker. Near-term contracts are what
+// cross-period GEX judgment actually needs — LEAPS two years out would
+// just clutter the list without adding signal.
+const MAX_EXPIRATIONS_SHOWN = 10;
+
+// Aggregate mode issues one option-chain fetch per expiration in a single
+// request. Moomoo/Futu caps that specific call at 10/30s — keep this well
+// under it (with headroom for whatever single-expiration lookups happen to
+// land in the same window) rather than reliably tripping the rate limit.
+const MAX_AGGREGATE_EXPIRATIONS = 5;
+
+const EXPIRATION_TYPE_LABEL = {
+  "0DTE": "0DTE",
+  "1DTE": "1DTE",
+  WEEKLY: "週",
+  MONTHLY: "月",
+};
+
+function fmtExpirationDate(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function fmtDollar(n) {
@@ -297,7 +310,12 @@ export default function TradingTerminalNotebook() {
 
   const [health, setHealth] = useState({ state: "idle", mode: null, error: null });
 
-  const [activeExpiry, setActiveExpiry] = useState("8/14");
+  const [expirations, setExpirations] = useState([]);
+  const [expirationsLoading, setExpirationsLoading] = useState(false);
+  const [expirationsError, setExpirationsError] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [aggregateMode, setAggregateMode] = useState(false);
+
   const [gexData, setGexData] = useState(null);
   const [gexLoading, setGexLoading] = useState(false);
   const [gexError, setGexError] = useState(null);
@@ -329,7 +347,13 @@ export default function TradingTerminalNotebook() {
   });
   const [conversationId] = useState(() => crypto.randomUUID());
 
-  const dte = daysUntil(activeExpiry);
+  const selectedExpiration = expirations.find((e) => e.date === selectedDate) || null;
+  const aggregateExpirations = expirations.slice(0, MAX_AGGREGATE_EXPIRATIONS);
+  const dte = aggregateMode
+    ? aggregateExpirations.length
+      ? Math.min(...aggregateExpirations.map((e) => e.days_to_expiration))
+      : 0
+    : selectedExpiration?.days_to_expiration ?? 0;
 
   // ---------- Health check ----------
   async function checkHealth() {
@@ -353,12 +377,52 @@ export default function TradingTerminalNotebook() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- GEX fetch (tab switch / ticker commit drives header + left panel) ----------
+  // ---------- Expirations fetch (ticker change drives the real, dynamic list) ----------
   useEffect(() => {
+    let cancelled = false;
+    setExpirationsLoading(true);
+    setExpirationsError(null);
+    fetch(`${BASE_URL}/api/v1/expirations/${ticker}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await parseErrorDetail(res));
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const list = (data.expirations || []).slice(0, MAX_EXPIRATIONS_SHOWN);
+        setExpirations(list);
+        setExpirationsLoading(false);
+        setSelectedDate((prev) => {
+          if (list.some((e) => e.date === prev)) return prev;
+          const defaultPick =
+            list.find((e) => e.expiration_type !== "0DTE" && e.expiration_type !== "1DTE") || list[0];
+          return defaultPick ? defaultPick.date : null;
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setExpirationsError(err.message || "無法取得到期日");
+        setExpirationsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker]);
+
+  // ---------- GEX fetch (expiration / aggregate toggle drives header + left panel) ----------
+  useEffect(() => {
+    if (aggregateMode ? expirations.length === 0 : !selectedDate) return;
     let cancelled = false;
     setGexLoading(true);
     setGexError(null);
-    fetch(`${BASE_URL}/api/v1/gex/${ticker}?days_to_expiration=${dte}`)
+    const url = aggregateMode
+      ? `${BASE_URL}/api/v1/gex/${ticker}/aggregate?` +
+        expirations
+          .slice(0, MAX_AGGREGATE_EXPIRATIONS)
+          .map((e) => `expirations=${e.date}`)
+          .join("&")
+      : `${BASE_URL}/api/v1/gex/${ticker}?days_to_expiration=${dte}`;
+    fetch(url)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -377,7 +441,7 @@ export default function TradingTerminalNotebook() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeExpiry, ticker]);
+  }, [ticker, selectedDate, aggregateMode, expirations]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -516,21 +580,36 @@ export default function TradingTerminalNotebook() {
         <section className={`${mobileTab === "gex" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden`}>
           <PaneHeader icon={<Activity size={13} />} title="Gamma / GEX" />
           <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-[18px] pb-5">
-            <div className="flex gap-1 mb-3.5 bg-[#0b0b0c] p-[3px] rounded border border-[rgba(240,237,229,.09)]">
-              {EXPIRIES.map((exp) => (
-                <button
-                  key={exp}
-                  type="button"
-                  onClick={() => setActiveExpiry(exp)}
-                  className={`flex-1 py-1.5 text-[11.5px] font-semibold rounded-sm transition-colors ${
-                    exp === activeExpiry ? "bg-[#c9a15c] text-[#1a1408]" : "text-[#8d8d93] hover:text-[#f0ede5]"
-                  }`}
-                >
-                  {exp}
-                </button>
-              ))}
-            </div>
+            <select
+              value={aggregateMode ? "__aggregate__" : selectedDate || ""}
+              onChange={(e) => {
+                if (e.target.value === "__aggregate__") {
+                  setAggregateMode(true);
+                } else {
+                  setAggregateMode(false);
+                  setSelectedDate(e.target.value);
+                }
+              }}
+              disabled={expirationsLoading || expirations.length === 0}
+              className={`w-full mb-3.5 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2.5 py-2 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] disabled:opacity-50 ${MONO}`}
+              title="選擇到期日，或切換至全到期日總合"
+            >
+              {expirationsLoading && <option>載入到期日中…</option>}
+              {!expirationsLoading &&
+                expirations.map((e) => (
+                  <option key={e.date} value={e.date}>
+                    {fmtExpirationDate(e.date)} · {EXPIRATION_TYPE_LABEL[e.expiration_type] || e.expiration_type} ·{" "}
+                    {e.days_to_expiration} DTE
+                  </option>
+                ))}
+              {!expirationsLoading && (
+                <option value="__aggregate__">📊 Aggregate GEX（全到期日總合）</option>
+              )}
+            </select>
 
+            {expirationsError && (
+              <div className="text-[10.5px] text-[#d8622b] mb-3 leading-snug">⚠ {expirationsError}</div>
+            )}
             {gexError && (
               <div className="text-[10.5px] text-[#d8622b] mb-3 leading-snug">⚠ {gexError}</div>
             )}
@@ -541,7 +620,16 @@ export default function TradingTerminalNotebook() {
             </div>
 
             <Card>
-              <CardTitle title="GEX by Strike" tag={`${activeExpiry} exp · ${dte} DTE`} />
+              <CardTitle
+                title="GEX by Strike"
+                tag={
+                  aggregateMode
+                    ? `Aggregate · ${aggregateExpirations.length} 檔到期日`
+                    : selectedExpiration
+                      ? `${fmtExpirationDate(selectedExpiration.date)} exp · ${selectedExpiration.days_to_expiration} DTE`
+                      : "—"
+                }
+              />
               <GexChart
                 putWall={gexData?.put_wall}
                 zeroGamma={gexData?.zero_gamma}

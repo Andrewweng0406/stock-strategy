@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Literal
 from uuid import UUID
@@ -9,6 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field
 class GEXStatus(str, Enum):
     POS_GAMMA = "POS_GAMMA"
     NEG_GAMMA = "NEG_GAMMA"
+
+
+class ExpirationType(str, Enum):
+    ZERO_DTE = "0DTE"
+    ONE_DTE = "1DTE"
+    WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"
 
 
 class PlanStatus(str, Enum):
@@ -97,6 +104,17 @@ class ChatResponse(StrictModel):
 
 class SavePlanRequest(StrictModel):
     plan: UserTradePlan
+
+
+class ExpirationInfo(StrictModel):
+    date: date
+    days_to_expiration: int = Field(ge=0)
+    expiration_type: ExpirationType
+
+
+class ExpirationList(StrictModel):
+    ticker: str
+    expirations: list[ExpirationInfo]
 
 
 class SyncGexRequest(StrictModel):

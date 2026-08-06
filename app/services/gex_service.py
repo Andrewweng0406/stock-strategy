@@ -2,11 +2,17 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import date
+
+from pydantic import TypeAdapter
 
 from app.cache import ResilientCache
 from app.market_data import MarketDataClient
-from app.models import OptionGEXSummary
+from app.models import ExpirationInfo, OptionGEXSummary
 from app.services.cloud_sync import CloudSync
+
+
+_EXPIRATIONS_ADAPTER = TypeAdapter(list[ExpirationInfo])
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,37 @@ class GEXService:
             if cached:
                 return OptionGEXSummary.model_validate_json(cached)
             return await self._refresh(ticker, days_to_expiration)
+
+    async def get_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        ticker = ticker.strip().upper()
+        key = f"expirations:v1:{ticker}"
+        cached = await self.cache.get(key)
+        if cached:
+            return _EXPIRATIONS_ADAPTER.validate_json(cached)
+        expirations = await self.market_data.get_available_expirations(ticker)
+        await self.cache.set(
+            key, _EXPIRATIONS_ADAPTER.dump_json(expirations).decode(), self.ttl_seconds
+        )
+        return expirations
+
+    async def get_aggregate_summary(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        """Combined GEX across several expirations at once. Deliberately
+        outside the poller/cloud-sync path — it walks one full option chain
+        per expiration, so it's meaningfully more expensive than a single
+        lookup and is only ever computed on an explicit user request.
+        """
+        ticker = ticker.strip().upper()
+        sorted_dates = sorted(set(expiration_dates))
+        dates_key = ",".join(d.isoformat() for d in sorted_dates)
+        key = f"gex:agg:v1:{ticker}:{dates_key}"
+        cached = await self.cache.get(key)
+        if cached:
+            return OptionGEXSummary.model_validate_json(cached)
+        summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
+        await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
+        return summary
 
     def _prune(self) -> None:
         """Drop tracking for tickers/expiries nobody's asked about in a
