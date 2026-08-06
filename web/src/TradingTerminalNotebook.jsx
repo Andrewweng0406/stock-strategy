@@ -311,6 +311,10 @@ export default function TradingTerminalNotebook() {
   const [signError, setSignError] = useState(null);
   const [journal, setJournal] = useState([]);
 
+  // Mobile-only: which of the three panels is showing (below the `lg` breakpoint).
+  const [mobileTab, setMobileTab] = useState("chat");
+  const [planBadge, setPlanBadge] = useState(false);
+
   const scrollRef = useRef(null);
   const isComposing = useRef(false);
 
@@ -411,7 +415,10 @@ export default function TradingTerminalNotebook() {
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
       setMessages((m) => [...m, { role: "assistant", content: data.assistant_message }]);
-      if (data.trade_plan_card) setTradePlan(data.trade_plan_card);
+      if (data.trade_plan_card) {
+        setTradePlan(data.trade_plan_card);
+        setPlanBadge(true);
+      }
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -454,8 +461,8 @@ export default function TradingTerminalNotebook() {
   return (
     <div className={`h-screen flex flex-col bg-[#121214] text-[#f0ede5] ${MONO} text-[13px] overflow-hidden`}>
       {/* HEADER */}
-      <header className="flex items-center gap-7 px-6 py-3.5 border-b border-[rgba(240,237,229,.09)] bg-gradient-to-b from-[#1b1b1e] to-[#121214]">
-        <div className="flex items-baseline gap-2.5">
+      <header className="flex items-center gap-4 lg:gap-7 px-4 lg:px-6 py-3.5 border-b border-[rgba(240,237,229,.09)] bg-gradient-to-b from-[#1b1b1e] to-[#121214] overflow-x-auto">
+        <div className="flex items-baseline gap-2.5 shrink-0">
           <input
             value={tickerInput}
             onChange={(e) => setTickerInput(e.target.value)}
@@ -471,17 +478,17 @@ export default function TradingTerminalNotebook() {
           />
           <span className="text-[11px] text-[#8d8d93]">Equity Options</span>
         </div>
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-2 shrink-0">
           <span className="text-[22px] font-bold [font-variant-numeric:tabular-nums]">
             {fmtDollar(gexData?.stock_price)}
           </span>
         </div>
-        <div className="flex gap-2.5 ml-1.5">
+        <div className="flex gap-2.5 ml-1.5 shrink-0">
           <MetricChip label="Zero Γ" value={fmtDollar(gexData?.zero_gamma)} color="#c9a15c" />
           <MetricChip label="Call Wall" value={fmtDollar(gexData?.call_wall)} color="#2fa37a" />
           <MetricChip label="Put Wall" value={fmtDollar(gexData?.put_wall)} color="#d8622b" />
         </div>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="lg:ml-auto flex items-center gap-3 shrink-0">
           {gexError && (
             <span className="text-[10px] text-[#d8622b]">GEX 請求失敗</span>
           )}
@@ -504,9 +511,9 @@ export default function TradingTerminalNotebook() {
       </header>
 
       {/* BODY */}
-      <div className="flex-1 min-h-0 grid grid-cols-[292px_minmax(380px,1fr)_352px] gap-px bg-[rgba(240,237,229,.09)]">
+      <div className="flex-1 min-h-0 flex flex-col lg:grid lg:grid-cols-[292px_minmax(380px,1fr)_352px] gap-px bg-[rgba(240,237,229,.09)] pb-14 lg:pb-0">
         {/* LEFT: GEX PANEL */}
-        <section className="flex flex-col min-h-0 bg-[#121214] overflow-hidden">
+        <section className={`${mobileTab === "gex" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden`}>
           <PaneHeader icon={<Activity size={13} />} title="Gamma / GEX" />
           <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-[18px] pb-5">
             <div className="flex gap-1 mb-3.5 bg-[#0b0b0c] p-[3px] rounded border border-[rgba(240,237,229,.09)]">
@@ -568,7 +575,7 @@ export default function TradingTerminalNotebook() {
         </section>
 
         {/* MIDDLE: AI CHAT */}
-        <section className="flex flex-col min-h-0 bg-[#121214] overflow-hidden">
+        <section className={`${mobileTab === "chat" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden`}>
           <PaneHeader
             icon={<PenTool size={13} className="rotate-90" />}
             title="AI Copilot"
@@ -668,7 +675,7 @@ export default function TradingTerminalNotebook() {
         </section>
 
         {/* RIGHT: TRADE PLAN NOTEBOOK CARD */}
-        <section className="flex flex-col min-h-0 bg-[#121214] overflow-hidden">
+        <section className={`${mobileTab === "plan" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-h-0 bg-[#121214] overflow-hidden`}>
           <PaneHeader icon={<PenTool size={13} />} title="Trade Plan Notebook" />
           <div
             className="flex-1 min-h-0 overflow-y-auto px-4 pt-[18px] pb-5"
@@ -796,11 +803,45 @@ export default function TradingTerminalNotebook() {
         </section>
       </div>
 
+      {/* MOBILE BOTTOM NAV — hidden at lg: and up, where all three panes show at once */}
+      <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 flex border-t border-[rgba(240,237,229,.09)] bg-[#1b1b1e] pb-[env(safe-area-inset-bottom)]">
+        <BottomNavTab icon="📊" label="GEX 籌碼" active={mobileTab === "gex"} onClick={() => setMobileTab("gex")} />
+        <BottomNavTab icon="💬" label="AI Copilot" active={mobileTab === "chat"} onClick={() => setMobileTab("chat")} />
+        <BottomNavTab
+          icon="📝"
+          label="交易計畫"
+          active={mobileTab === "plan"}
+          badge={planBadge}
+          onClick={() => {
+            setMobileTab("plan");
+            setPlanBadge(false);
+          }}
+        />
+      </nav>
+
       <style>{`
         @keyframes stampDown { from { opacity:0; transform:rotate(-16deg) scale(2.4); } to { opacity:1; transform:rotate(-16deg) scale(1); } }
         @keyframes cardIn { from { opacity:0; transform: translateY(-14px) rotate(-0.6deg); } to { opacity:1; transform: translateY(0) rotate(-0.6deg); } }
       `}</style>
     </div>
+  );
+}
+
+function BottomNavTab({ icon, label, active, badge, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-semibold transition-colors ${
+        active ? "text-[#c9a15c]" : "text-[#8d8d93]"
+      }`}
+    >
+      <span className="relative">
+        <span className="text-base leading-none">{icon}</span>
+        {badge && <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-[#d8622b] ring-2 ring-[#1b1b1e]" />}
+      </span>
+      {label}
+    </button>
   );
 }
 
