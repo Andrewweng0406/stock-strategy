@@ -25,7 +25,7 @@ import {
  *   POST /api/v1/plans/save                          -> UserTradePlan (signed)
  */
 
-const BASE_URL = "http://127.0.0.1:8002";
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
 const DEFAULT_TICKER = "AAPL";
 // Backend's ChatContext.history caps at 30 entries; stay under that.
 const MAX_HISTORY = 24;

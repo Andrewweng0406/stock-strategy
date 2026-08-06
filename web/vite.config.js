@@ -9,4 +9,10 @@ export default defineConfig({
       allow: [path.resolve(__dirname, "..")],
     },
   },
+  // Railway (and most PaaS hosts) proxy requests through a generated
+  // hostname — allow it rather than only localhost-style Host headers.
+  preview: {
+    host: true,
+    allowedHosts: true,
+  },
 });
