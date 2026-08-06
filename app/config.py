@@ -47,5 +47,18 @@ class Settings(BaseSettings):
             if origin.strip()
         ]
 
+    @property
+    def effective_database_url(self) -> str:
+        """Railway's Postgres addon hands back `postgres://` or
+        `postgresql://`; SQLAlchemy's async engine needs the `+asyncpg`
+        driver named explicitly. SQLite URLs pass through unchanged.
+        """
+        url = self.database_url
+        if url.startswith("postgres://"):
+            return "postgresql+asyncpg://" + url[len("postgres://") :]
+        if url.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + url[len("postgresql://") :]
+        return url
+
 
 settings = Settings()

@@ -53,7 +53,7 @@ class AppServices:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine(settings.effective_database_url)
     session_factory = async_sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False
     )
