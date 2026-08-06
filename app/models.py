@@ -99,6 +99,12 @@ class SavePlanRequest(StrictModel):
     plan: UserTradePlan
 
 
+class SyncGexRequest(StrictModel):
+    ticker: str = Field(min_length=1, max_length=32)
+    days_to_expiration: int = Field(ge=0, le=730)
+    summary: OptionGEXSummary
+
+
 class HealthResponse(StrictModel):
     status: str
     market_data_mode: str

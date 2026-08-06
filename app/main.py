@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import (
@@ -28,9 +28,10 @@ from app.models import (
     HealthResponse,
     OptionGEXSummary,
     SavePlanRequest,
+    SyncGexRequest,
     UserTradePlan,
 )
-from app.services import GEXService, LLMOrchestrator
+from app.services import CloudSync, GEXService, LLMOrchestrator
 
 
 logging.basicConfig(
@@ -78,12 +79,17 @@ async def lifespan(app: FastAPI):
         if settings.openai_api_key
         else None
     )
+    cloud_sync = (
+        CloudSync(settings.cloud_sync_url, settings.sync_token)
+        if settings.cloud_sync_url and settings.sync_token
+        else None
+    )
     app.state.services = AppServices(
         engine=engine,
         cache=cache,
         market_data=market_data,
         gex_service=GEXService(
-            market_data, cache, settings.cache_ttl_seconds
+            market_data, cache, settings.cache_ttl_seconds, cloud_sync
         ),
         plan_repository=PlanRepository(session_factory),
         llm=LLMOrchestrator(
@@ -152,6 +158,22 @@ async def chat(payload: ChatRequest, services: Services) -> ChatResponse:
         risk_profile=risk,
         trade_plan_card=trade_plan,
     )
+
+
+@app.post("/api/v1/sync/gex")
+async def sync_gex(
+    payload: SyncGexRequest,
+    services: Services,
+    x_sync_token: str = Header(default=""),
+) -> dict[str, str]:
+    if not settings.sync_token or x_sync_token != settings.sync_token:
+        raise HTTPException(status_code=403, detail="Invalid sync token")
+    ticker = payload.ticker.strip().upper()
+    key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
+    await services.cache.set(
+        key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
+    )
+    return {"status": "synced"}
 
 
 @app.post("/api/v1/plans/save", response_model=UserTradePlan)

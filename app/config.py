@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     moomoo_port: int = 11111
     risk_free_rate: float = 0.045
 
+    # Cloud sync: when both are set, this instance pushes real (non-mock) GEX
+    # summaries it computes to `{cloud_sync_url}/api/v1/sync/gex`. Used by the
+    # local instance (real Moomoo data) to keep the cloud deployment's cache
+    # warm with real data, without ever sending Moomoo credentials to the cloud.
+    cloud_sync_url: str | None = None
+    sync_token: str | None = None
+
     @property
     def allowed_cors_origins(self) -> list[str]:
         return [
