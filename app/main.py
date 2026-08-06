@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -86,7 +87,11 @@ async def lifespan(app: FastAPI):
         else None
     )
     gex_service = GEXService(
-        market_data, cache, settings.cache_ttl_seconds, cloud_sync
+        market_data,
+        cache,
+        settings.cache_ttl_seconds,
+        cloud_sync,
+        settings.active_window_seconds,
     )
     app.state.services = AppServices(
         engine=engine,
@@ -101,11 +106,7 @@ async def lifespan(app: FastAPI):
         ),
     )
     poller_task = (
-        asyncio.create_task(
-            gex_service.run_poller(
-                settings.sync_poll_seconds, settings.active_window_seconds
-            )
-        )
+        asyncio.create_task(gex_service.run_poller(settings.sync_poll_seconds))
         if cloud_sync
         else None
     )
@@ -181,7 +182,9 @@ async def sync_gex(
     services: Services,
     x_sync_token: str = Header(default=""),
 ) -> dict[str, str]:
-    if not settings.sync_token or x_sync_token != settings.sync_token:
+    if not settings.sync_token or not hmac.compare_digest(
+        x_sync_token, settings.sync_token
+    ):
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = payload.ticker.strip().upper()
     key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
