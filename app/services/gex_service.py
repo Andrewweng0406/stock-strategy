@@ -2,11 +2,12 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 
 from pydantic import TypeAdapter
 
 from app.cache import ResilientCache
+from app.database import GEXSnapshotRepository
 from app.market_data import MarketDataClient
 from app.models import ExpirationInfo, OptionGEXSummary
 from app.services.cloud_sync import CloudSync
@@ -26,12 +27,16 @@ class GEXService:
         ttl_seconds: int,
         cloud_sync: CloudSync | None = None,
         active_window_seconds: int = 300,
+        snapshot_repository: GEXSnapshotRepository | None = None,
+        snapshot_interval_seconds: int = 3600,
     ) -> None:
         self.market_data = market_data
         self.cache = cache
         self.ttl_seconds = ttl_seconds
         self.cloud_sync = cloud_sync
         self.active_window_seconds = active_window_seconds
+        self.snapshot_repository = snapshot_repository
+        self.snapshot_interval_seconds = snapshot_interval_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # (ticker, days_to_expiration) -> monotonic time last requested by a
         # real caller. Drives the background poller — only tickers/expiries
@@ -116,10 +121,15 @@ class GEXService:
         summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
         key = self._cache_key(ticker, days_to_expiration)
         await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
-        if self.cloud_sync and self.market_data.active_mode == "moomoo":
-            asyncio.create_task(
-                self._push_to_cloud(ticker, days_to_expiration, summary)
-            )
+        if self.market_data.active_mode == "moomoo":
+            if self.cloud_sync:
+                asyncio.create_task(
+                    self._push_to_cloud(ticker, days_to_expiration, summary)
+                )
+            if self.snapshot_repository:
+                asyncio.create_task(
+                    self._maybe_snapshot(ticker, days_to_expiration, summary)
+                )
         return summary
 
     async def run_poller(self, poll_seconds: int) -> None:
@@ -151,6 +161,27 @@ class GEXService:
             await self.cloud_sync.push(ticker, days_to_expiration, summary)
         except Exception:
             logger.warning("Cloud sync task failed for %s", ticker, exc_info=True)
+
+    async def _maybe_snapshot(
+        self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
+    ) -> None:
+        """Write a gex_snapshots row if the last one for this ticker is
+        older than snapshot_interval_seconds (or there isn't one yet). A
+        throttle on real data only, not the compute cadence — so the table
+        accumulates history without a row per poller tick.
+        """
+        assert self.snapshot_repository is not None
+        try:
+            last = await self.snapshot_repository.last_snapshot_time(ticker)
+            if last is not None:
+                age = datetime.now(timezone.utc) - last
+                if age.total_seconds() < self.snapshot_interval_seconds:
+                    return
+            await self.snapshot_repository.save_snapshot(
+                ticker, days_to_expiration, summary
+            )
+        except Exception:
+            logger.warning("Snapshot task failed for %s", ticker, exc_info=True)
 
     @staticmethod
     def _cache_key(ticker: str, days_to_expiration: int) -> str:

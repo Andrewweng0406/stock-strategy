@@ -9,6 +9,10 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,7 +23,13 @@ from sqlalchemy.ext.asyncio import (
 from app.analytics import GEXCalculator, parse_gex_risk_profile
 from app.cache import ResilientCache
 from app.config import settings
-from app.database import Base, ChatRepository, PlanRepository, ProfileRepository
+from app.database import (
+    Base,
+    ChatRepository,
+    GEXSnapshotRepository,
+    PlanRepository,
+    ProfileRepository,
+)
 from app.market_data import (
     FallbackMarketDataClient,
     MockMarketDataClient,
@@ -31,6 +41,7 @@ from app.models import (
     ConversationList,
     ConversationMessages,
     ExpirationList,
+    GEXSnapshotList,
     HealthResponse,
     OptionGEXSummary,
     PlanList,
@@ -58,6 +69,7 @@ class AppServices:
     plan_repository: PlanRepository
     chat_repository: ChatRepository
     profile_repository: ProfileRepository
+    snapshot_repository: GEXSnapshotRepository
     llm: LLMOrchestrator
 
 
@@ -95,12 +107,15 @@ async def lifespan(app: FastAPI):
         if settings.cloud_sync_url and settings.sync_token
         else None
     )
+    snapshot_repository = GEXSnapshotRepository(session_factory)
     gex_service = GEXService(
         market_data,
         cache,
         settings.cache_ttl_seconds,
         cloud_sync,
         settings.active_window_seconds,
+        snapshot_repository,
+        settings.snapshot_interval_seconds,
     )
     app.state.services = AppServices(
         engine=engine,
@@ -110,6 +125,7 @@ async def lifespan(app: FastAPI):
         plan_repository=PlanRepository(session_factory),
         chat_repository=ChatRepository(session_factory),
         profile_repository=ProfileRepository(session_factory),
+        snapshot_repository=snapshot_repository,
         llm=LLMOrchestrator(
             openai_client,
             settings.openai_model,
@@ -142,6 +158,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limiting: keyed on client IP. Requires uvicorn's --proxy-headers so
+# request.client.host resolves to the real caller instead of Railway's edge
+# proxy (see Procfile / the backend service's startCommand).
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 
 def get_services(request: Request) -> AppServices:
@@ -186,8 +210,21 @@ async def get_gex_aggregate(
     return await services.gex_service.get_aggregate_summary(ticker, expirations)
 
 
+@app.get("/api/v1/gex/{ticker}/history", response_model=GEXSnapshotList)
+async def get_gex_history(
+    ticker: str,
+    services: Services,
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> GEXSnapshotList:
+    snapshots = await services.snapshot_repository.list_snapshots(ticker, limit)
+    return GEXSnapshotList(ticker=ticker.strip().upper(), snapshots=snapshots)
+
+
 @app.post("/api/v1/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest, services: Services) -> ChatResponse:
+@limiter.limit(settings.chat_rate_limit)
+async def chat(
+    request: Request, payload: ChatRequest, services: Services
+) -> ChatResponse:
     summary = await services.gex_service.get_summary(
         payload.context.ticker, payload.context.days_to_expiration
     )

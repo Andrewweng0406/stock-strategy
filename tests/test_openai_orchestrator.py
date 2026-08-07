@@ -9,6 +9,7 @@ from app.models import (
     GEXStatus,
     OptionGEXSummary,
     RiskProfile,
+    UserProfile,
 )
 from app.services.openai_orchestrator import LLMOrchestrator
 
@@ -94,6 +95,59 @@ def test_plan_reply_is_bulleted_and_below_limit() -> None:
     assert "Theta 約 $8.50/日" in compact
     assert "低於 1:1.5" in compact
     assert len(compact) <= 200
+
+
+def test_infer_profile_prefers_explicit_mention_over_saved_default() -> None:
+    assert (
+        LLMOrchestrator._infer_profile("選 A 保守一點", saved_default="AGGRESSIVE")
+        == "CONSERVATIVE"
+    )
+
+
+def test_infer_profile_falls_back_to_saved_default_when_unstated() -> None:
+    assert (
+        LLMOrchestrator._infer_profile("這檔怎麼看", saved_default="AGGRESSIVE")
+        == "AGGRESSIVE"
+    )
+
+
+def test_infer_profile_defaults_to_balanced_with_no_saved_preference() -> None:
+    assert LLMOrchestrator._infer_profile("這檔怎麼看", saved_default=None) == "BALANCED"
+
+
+def test_proposal_reply_marks_saved_preference_profile() -> None:
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    reply = orchestrator._proposal_reply(
+        gex_summary(), "BEARISH", 5, saved_risk_tolerance="AGGRESSIVE"
+    )
+    assert "C激進★" in reply
+    assert "A保守★" not in reply
+    assert "B中性★" not in reply
+    assert "已套用你的偏好設定" in reply
+
+
+def test_proposal_reply_has_no_marker_without_saved_preference() -> None:
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    reply = orchestrator._proposal_reply(gex_summary(), "BEARISH", 5)
+    assert "★" not in reply
+
+
+def test_instructions_embed_user_profile_when_present() -> None:
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    risk = RiskProfile(
+        gex_status=GEXStatus.NEG_GAMMA,
+        volatility_regime="HIGH_VOL_TRENDING",
+        risk_level="NORMAL",
+        warnings=[],
+        locked_warning=False,
+    )
+    profile = UserProfile(user_id="user-1", risk_tolerance="AGGRESSIVE")
+    prompt = orchestrator._instructions(gex_summary(), risk, 5, profile)
+    assert '"risk_tolerance": "AGGRESSIVE"' in prompt
+    assert "user_id" not in prompt
+
+    prompt_without_profile = orchestrator._instructions(gex_summary(), risk, 5, None)
+    assert '"user_profile": null' in prompt_without_profile
 
 
 def test_system_prompt_contains_trader_risk_framework() -> None:

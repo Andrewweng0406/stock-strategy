@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # local frontend last asked for it.
     active_window_seconds: int = 300
 
+    # /api/v1/chat is the only endpoint that spends real OpenAI budget per
+    # call; cap it per client IP so a bug or abusive client can't run up the
+    # bill. slowapi's rate-string format: "<count>/<second|minute|hour|day>".
+    chat_rate_limit: str = "10/minute"
+
+    # How often a real (non-mock) GEX calculation gets written to
+    # gex_snapshots per ticker — a throttle, not the compute cadence, so the
+    # table doesn't fill with near-duplicate rows every poller tick.
+    snapshot_interval_seconds: int = 3600
+
     @property
     def allowed_cors_origins(self) -> list[str]:
         return [

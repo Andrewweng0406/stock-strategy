@@ -119,6 +119,67 @@ function extractQuickReplies(text) {
   return isSequential ? matches : [];
 }
 
+/**
+ * Renders **bold** spans within a line of chat text as <strong> instead of
+ * showing the literal asterisks. Plain string splitting, not
+ * dangerouslySetInnerHTML — every fragment is text React escapes on its own.
+ */
+function renderInlineFormatting(line, keyPrefix) {
+  const parts = line.split(/(\*\*[^*]+\*\*)/g).filter((p) => p !== "");
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return (
+        <strong key={`${keyPrefix}-${i}`} className="font-semibold text-[#f0ede5]">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    return <span key={`${keyPrefix}-${i}`}>{part}</span>;
+  });
+}
+
+/**
+ * Minimal safe markdown for AI chat bubbles: "- "/"* " lines become a
+ * bullet list, everything else stays a plain (bold-formatted) line. Covers
+ * what the backend's replies actually use without pulling in a full
+ * markdown dependency.
+ */
+function ChatMessageBody({ text }) {
+  const lines = text.split("\n");
+  const blocks = [];
+  let currentList = null;
+  for (const line of lines) {
+    const bulletMatch = line.match(/^\s*[-*]\s+(.*)$/);
+    if (bulletMatch) {
+      if (!currentList) {
+        currentList = [];
+        blocks.push({ type: "list", items: currentList });
+      }
+      currentList.push(bulletMatch[1]);
+    } else {
+      currentList = null;
+      blocks.push({ type: "line", text: line });
+    }
+  }
+  return (
+    <>
+      {blocks.map((block, i) => {
+        if (block.type === "list") {
+          return (
+            <ul key={i} className="list-disc pl-4 space-y-0.5 marker:text-[#57575c]">
+              {block.items.map((item, j) => (
+                <li key={j}>{renderInlineFormatting(item, `${i}-${j}`)}</li>
+              ))}
+            </ul>
+          );
+        }
+        const rendered = renderInlineFormatting(block.text, `${i}`);
+        return <div key={i}>{rendered.length > 0 ? rendered : " "}</div>;
+      })}
+    </>
+  );
+}
+
 /** Shared fixed-position tooltip box, cursor-anchored via clientX/clientY. */
 function ChartTooltip({ point, title, lines }) {
   if (!point) return null;
@@ -859,7 +920,7 @@ export default function TradingTerminalNotebook() {
                         : "bg-[#1b1b1e] border border-[rgba(240,237,229,.09)] rounded-bl-sm"
                     }`}
                   >
-                    {m.content}
+                    <ChatMessageBody text={m.content} />
                   </div>
                   {quickReplies.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 w-full mt-0.5">

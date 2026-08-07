@@ -155,6 +155,24 @@ class PlanList(StrictModel):
     plans: list[UserTradePlan]
 
 
+class GEXSnapshot(StrictModel):
+    ticker: str
+    days_to_expiration: int
+    captured_at: datetime
+    underlying_price: float
+    zero_gamma_strike: float
+    call_wall_strike: float
+    put_wall_strike: float
+    net_gex: float
+    iv_rank: float
+    gex_status: GEXStatus
+
+
+class GEXSnapshotList(StrictModel):
+    ticker: str
+    snapshots: list[GEXSnapshot]
+
+
 RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 
 

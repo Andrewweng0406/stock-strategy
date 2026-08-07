@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, String, Text, select
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -8,6 +8,9 @@ from app.models import (
     ChatMessageRecord,
     ConversationMessages,
     ConversationSummary,
+    GEXSnapshot,
+    GEXStatus,
+    OptionGEXSummary,
     PlanStatus,
     UserProfile,
     UserProfileUpdate,
@@ -17,6 +20,17 @@ from app.models import (
 
 class Base(DeclarativeBase):
     pass
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite drops tzinfo on read even though every datetime column is
+    declared timezone-aware (Postgres/asyncpg preserves it fine); every
+    value is written via datetime.now(timezone.utc), so a naive read-back
+    is always UTC.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 class TradePlanRecord(Base):
@@ -114,8 +128,8 @@ class PlanRepository:
                     max_loss_usd=record.max_loss_usd,
                     theta_warning=record.theta_warning,
                     status=PlanStatus(record.status),
-                    created_at=record.created_at,
-                    signed_at=record.signed_at,
+                    created_at=_as_utc(record.created_at),
+                    signed_at=_as_utc(record.signed_at),
                 )
                 for record in records
             ]
@@ -178,7 +192,7 @@ class ChatRepository:
                 conversation_id=conversation_id,
                 ticker=messages[-1].ticker,
                 last_message=messages[-1].content[:200],
-                last_message_at=messages[-1].created_at,
+                last_message_at=_as_utc(messages[-1].created_at),
                 message_count=len(messages),
             )
             for conversation_id, messages in grouped.items()
@@ -202,7 +216,7 @@ class ChatRepository:
                 ChatMessageRecord(
                     role=record.role,
                     content=record.content,
-                    created_at=record.created_at,
+                    created_at=_as_utc(record.created_at),
                 )
                 for record in records
             ]
@@ -236,7 +250,7 @@ class ProfileRepository:
                 else []
             ),
             notes=record.notes,
-            updated_at=record.updated_at,
+            updated_at=_as_utc(record.updated_at),
         )
 
     async def get_profile(self, user_id: str) -> UserProfile | None:
@@ -258,3 +272,81 @@ class ProfileRepository:
             record.updated_at = datetime.now(timezone.utc)
             await session.commit()
             return self._to_model(record)
+
+
+class GEXSnapshotDBRecord(Base):
+    __tablename__ = "gex_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(32), index=True)
+    days_to_expiration: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    underlying_price: Mapped[float] = mapped_column(Float)
+    zero_gamma_strike: Mapped[float] = mapped_column(Float)
+    call_wall_strike: Mapped[float] = mapped_column(Float)
+    put_wall_strike: Mapped[float] = mapped_column(Float)
+    net_gex: Mapped[float] = mapped_column(Float)
+    iv_rank: Mapped[float] = mapped_column(Float)
+    gex_status: Mapped[str] = mapped_column(String(16))
+
+
+class GEXSnapshotRepository:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    async def save_snapshot(
+        self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
+    ) -> None:
+        async with self.session_factory() as session:
+            session.add(
+                GEXSnapshotDBRecord(
+                    ticker=ticker,
+                    days_to_expiration=days_to_expiration,
+                    captured_at=datetime.now(timezone.utc),
+                    underlying_price=summary.stock_price,
+                    zero_gamma_strike=summary.zero_gamma,
+                    call_wall_strike=summary.call_wall,
+                    put_wall_strike=summary.put_wall,
+                    net_gex=summary.net_gex,
+                    iv_rank=summary.iv_rank,
+                    gex_status=summary.gex_status.value,
+                )
+            )
+            await session.commit()
+
+    async def last_snapshot_time(self, ticker: str) -> datetime | None:
+        async with self.session_factory() as session:
+            captured_at = await session.scalar(
+                select(GEXSnapshotDBRecord.captured_at)
+                .where(GEXSnapshotDBRecord.ticker == ticker)
+                .order_by(desc(GEXSnapshotDBRecord.captured_at))
+                .limit(1)
+            )
+            # SQLite drops tzinfo on read even though the column is declared
+            # timezone-aware (Postgres/asyncpg preserves it fine); every row
+            # is written in UTC, so a naive value read back is always UTC.
+            return _as_utc(captured_at)
+
+    async def list_snapshots(self, ticker: str, limit: int = 100) -> list[GEXSnapshot]:
+        async with self.session_factory() as session:
+            records = await session.scalars(
+                select(GEXSnapshotDBRecord)
+                .where(GEXSnapshotDBRecord.ticker == ticker)
+                .order_by(desc(GEXSnapshotDBRecord.captured_at))
+                .limit(limit)
+            )
+            return [
+                GEXSnapshot(
+                    ticker=record.ticker,
+                    days_to_expiration=record.days_to_expiration,
+                    captured_at=_as_utc(record.captured_at),
+                    underlying_price=record.underlying_price,
+                    zero_gamma_strike=record.zero_gamma_strike,
+                    call_wall_strike=record.call_wall_strike,
+                    put_wall_strike=record.put_wall_strike,
+                    net_gex=record.net_gex,
+                    iv_rank=record.iv_rank,
+                    gex_status=GEXStatus(record.gex_status),
+                )
+                for record in records
+            ]
