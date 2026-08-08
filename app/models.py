@@ -11,6 +11,12 @@ class GEXStatus(str, Enum):
     NEG_GAMMA = "NEG_GAMMA"
 
 
+class PinningRegime(str, Enum):
+    PINNING = "PINNING"
+    BREAKOUT = "BREAKOUT"
+    NEUTRAL = "NEUTRAL"
+
+
 class ExpirationType(str, Enum):
     ZERO_DTE = "0DTE"
     ONE_DTE = "1DTE"
@@ -27,6 +33,18 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PinningAnalysis(StrictModel):
+    pin_strike: float = Field(gt=0)
+    pin_strike_matches_max_pain: bool
+    distance_pct: float = Field(ge=0)
+    oi_concentration_pct: float = Field(ge=0)
+    in_positive_gamma: bool
+    has_broken_wall: bool
+    score: int = Field(ge=0, le=100)
+    label: str
+    regime: PinningRegime
+
+
 class OptionGEXSummary(StrictModel):
     ticker: str
     stock_price: float = Field(gt=0)
@@ -39,6 +57,11 @@ class OptionGEXSummary(StrictModel):
     calculated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    # 加分項——真實 Moomoo 資料一定會有（期權鏈非空是取得 GEXSummary 的
+    # 前提），mock 模式也會用同樣的規則型邏輯算出一組示意值；理論上只有
+    # 極端邊界情況（例如現貨價無效）才會是 None，見 app/analytics.py
+    # compute_pinning_for_contracts() 的 try/except。
+    pinning: PinningAnalysis | None = None
 
 
 class RiskProfile(StrictModel):

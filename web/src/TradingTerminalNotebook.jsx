@@ -785,6 +785,8 @@ export default function TradingTerminalNotebook() {
               <Stat label="IV Rank" value={gexData ? `${gexData.iv_rank.toFixed(0)}%` : "—"} />
             </div>
 
+            <PinningCard pinning={gexData?.pinning} />
+
             <Card>
               <CardTitle
                 title="GEX by Strike"
@@ -1327,6 +1329,54 @@ function Stat({ label, value, tone }) {
         {value}
       </div>
     </div>
+  );
+}
+
+const PINNING_REGIME_STYLE = {
+  PINNING: { label: "Pinning · 磁吸區間", bg: "rgba(47,163,122,.16)", border: "rgba(47,163,122,.4)", fg: "#2fa37a" },
+  BREAKOUT: { label: "Breakout · 突破區間", bg: "rgba(216,98,44,.16)", border: "rgba(216,98,44,.4)", fg: "#d8622b" },
+  NEUTRAL: { label: "Neutral · 中性觀望", bg: "rgba(141,141,147,.14)", border: "rgba(141,141,147,.35)", fg: "#8d8d93" },
+};
+
+/**
+ * 顯示 backend app/pinning_engine.py 算出的 Pinning 判定——跟 Zero Γ/Call
+ * Wall/Put Wall 用的是同一份真實 Moomoo 期權鏈資料（後端在同一次抓取裡
+ * 附加上去，不是另外打一次 API），所以這裡的數字永遠跟上方的 GEX 卡片
+ * 一致，不會有兩邊對不上的問題。pinning 為 null 時（加分項計算失敗）
+ * 顯示佔位文字，不讓整張卡片消失造成版面跳動。
+ */
+function PinningCard({ pinning }) {
+  const style = pinning ? PINNING_REGIME_STYLE[pinning.regime] || PINNING_REGIME_STYLE.NEUTRAL : null;
+  return (
+    <Card>
+      <CardTitle
+        title="Pinning 判定"
+        tag={pinning ? `${pinning.score}/100` : "—"}
+        tagTitle="做市商磁吸/卡價效應分數（0~100，規則透明評分，非黑箱模型）"
+      />
+      {!pinning ? (
+        <div className="text-[10.5px] text-[#57575c]">尚無 Pinning 資料</div>
+      ) : (
+        <>
+          <div
+            className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold mb-3"
+            style={{ background: style.bg, border: `1px solid ${style.border}`, color: style.fg }}
+          >
+            {style.label}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="Pin Strike" value={fmtDollar(pinning.pin_strike)} />
+            <Stat label="距離" value={`${pinning.distance_pct.toFixed(2)}%`} />
+            <Stat label="OI 集中度" value={`${pinning.oi_concentration_pct.toFixed(1)}%`} />
+            <Stat
+              label="正 Gamma"
+              value={pinning.in_positive_gamma ? "是" : "否"}
+              tone={pinning.in_positive_gamma ? "bull" : "bear"}
+            />
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

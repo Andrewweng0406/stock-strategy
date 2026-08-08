@@ -60,3 +60,32 @@ async def test_mock_client_aggregate_with_empty_dates_uses_multiplier_one() -> N
     single = await client.get_gex_summary("AAPL", 30)
     aggregate = await client.get_gex_summary_multi("AAPL", [])
     assert aggregate.net_gex == single.net_gex
+
+
+@pytest.mark.asyncio
+async def test_mock_client_populates_pinning_card() -> None:
+    """mock 模式也該產生一組示意用的 Pinning 卡片，跟其他既有欄位一樣，
+    讓雲端/demo 環境的前端有東西可以顯示，不會因為沒有真實 Moomoo 資料
+    整張卡片消失。
+    """
+    client = MockMarketDataClient()
+    summary = await client.get_gex_summary("AAPL", 30)
+    assert summary.pinning is not None
+    assert summary.pinning.regime in {"PINNING", "BREAKOUT", "NEUTRAL"}
+    assert 0 <= summary.pinning.score <= 100
+
+
+@pytest.mark.asyncio
+async def test_mock_client_pinning_is_deterministic_per_ticker() -> None:
+    client = MockMarketDataClient()
+    first = await client.get_gex_summary("AAPL", 30)
+    second = await client.get_gex_summary("AAPL", 30)
+    assert first.pinning.model_dump() == second.pinning.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_mock_client_aggregate_inherits_pinning_from_base() -> None:
+    client = MockMarketDataClient()
+    single = await client.get_gex_summary("AAPL", 30)
+    aggregate = await client.get_gex_summary_multi("AAPL", [date(2026, 8, 21)])
+    assert aggregate.pinning.model_dump() == single.pinning.model_dump()

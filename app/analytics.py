@@ -1,10 +1,15 @@
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Literal
 
-from app.models import GEXStatus, OptionGEXSummary, RiskProfile
+from app import pinning_engine
+from app.models import GEXStatus, OptionGEXSummary, PinningAnalysis, RiskProfile
+
+
+logger = logging.getLogger(__name__)
 
 
 HIGH_RISK_WARNING = "High risk/high volatility; accelerated theta decay."
@@ -174,3 +179,69 @@ class GEXCalculator:
             net_gex=round(net_gex, 2),
             gex_status=status,
         )
+
+
+def _aggregate_oi_by_strike(contracts: list[OptionContract]) -> list[dict]:
+    """把逐合約的 OptionContract 清單彙整成 pinning_engine 要的
+    [{"strike":, "call_oi":, "put_oi":}, ...] 形狀——同一履約價的 Call/Put
+    未平倉量分開加總（同一履約價可能橫跨多個到期日一起傳進來，例如聚合
+    模式，這裡自然加總，不假設輸入已經去重）。
+    """
+    by_strike: dict[float, dict] = {}
+    for contract in contracts:
+        row = by_strike.setdefault(
+            contract.strike, {"strike": contract.strike, "call_oi": 0.0, "put_oi": 0.0}
+        )
+        if contract.option_type == "CALL":
+            row["call_oi"] += contract.open_interest
+        else:
+            row["put_oi"] += contract.open_interest
+    return list(by_strike.values())
+
+
+def _calculate_max_pain(gex_by_strike: list[dict]) -> float:
+    """Max Pain：找出讓所有未平倉期權「到期內在價值總和」最小的履約價——
+    理論上這是做市商避險成本最低、因此有誘因把股價釘在附近的價位。
+    對每個候選履約價 S，計算：
+        sum(call_oi_k * max(0, S-k)) + sum(put_oi_k * max(0, k-S))
+    取讓這個總和最小的 S。
+    """
+    strikes = [row["strike"] for row in gex_by_strike]
+    call_oi = {row["strike"]: row["call_oi"] for row in gex_by_strike}
+    put_oi = {row["strike"]: row["put_oi"] for row in gex_by_strike}
+
+    best_strike, best_loss = strikes[0], float("inf")
+    for candidate in strikes:
+        loss = sum(call_oi[k] * max(0.0, candidate - k) for k in strikes)
+        loss += sum(put_oi[k] * max(0.0, k - candidate) for k in strikes)
+        if loss < best_loss:
+            best_strike, best_loss = candidate, loss
+    return best_strike
+
+
+def compute_pinning_for_contracts(
+    contracts: list[OptionContract], summary: OptionGEXSummary
+) -> PinningAnalysis | None:
+    """從同一批已經抓好的 contracts（跟 GEXCalculator.calculate() 用的是
+    同一份資料，不會多打任何 Moomoo API）算出 Pinning 判斷，附加在
+    OptionGEXSummary 上給前端顯示卡片用。
+
+    加分項——計算失敗（理論上只有 contracts 為空或現貨價無效這種邊界
+    情況才會發生，正常情況 GEXCalculator.calculate() 已經先擋掉空清單）
+    不該讓整個 GEX 摘要連帶失敗，只記警告、回傳 None，前端優雅跳過
+    Pinning 卡片。
+    """
+    try:
+        gex_by_strike = _aggregate_oi_by_strike(contracts)
+        if not gex_by_strike:
+            return None
+        max_pain = _calculate_max_pain(gex_by_strike)
+        in_positive_gamma = summary.gex_status == GEXStatus.POS_GAMMA
+        result = pinning_engine.compute_pinning_analysis(
+            gex_by_strike, summary.stock_price, max_pain,
+            summary.call_wall, summary.put_wall, in_positive_gamma,
+        )
+        return PinningAnalysis(**result) if result else None
+    except Exception:
+        logger.exception("Pinning analysis failed; omitting pinning card")
+        return None

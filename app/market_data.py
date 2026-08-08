@@ -8,8 +8,15 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from app.analytics import GEXCalculator, OptionContract
-from app.models import ExpirationInfo, ExpirationType, GEXStatus, OptionGEXSummary
+from app import pinning_engine
+from app.analytics import GEXCalculator, OptionContract, compute_pinning_for_contracts
+from app.models import (
+    ExpirationInfo,
+    ExpirationType,
+    GEXStatus,
+    OptionGEXSummary,
+    PinningAnalysis,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,20 +73,51 @@ class MockMarketDataClient(MarketDataClient):
         seed = int(hashlib.sha256(ticker.upper().encode()).hexdigest()[:8], 16)
         stock_price = float(80 + seed % 250)
         zero_gamma = max(1.0, stock_price + ((seed // 7) % 21) - 10)
+        call_wall = round(stock_price * 1.05, 2)
+        put_wall = round(stock_price * 0.95, 2)
+        gex_status = (
+            GEXStatus.POS_GAMMA if stock_price > zero_gamma else GEXStatus.NEG_GAMMA
+        )
         return OptionGEXSummary(
             ticker=ticker.upper(),
             stock_price=stock_price,
             zero_gamma=zero_gamma,
-            call_wall=round(stock_price * 1.05, 2),
-            put_wall=round(stock_price * 0.95, 2),
+            call_wall=call_wall,
+            put_wall=put_wall,
             iv_rank=float(30 + seed % 60),
             net_gex=float(((seed % 200) - 100) * 1_000_000),
-            gex_status=(
-                GEXStatus.POS_GAMMA
-                if stock_price > zero_gamma
-                else GEXStatus.NEG_GAMMA
+            gex_status=gex_status,
+            pinning=self._mock_pinning(
+                seed, stock_price, call_wall, put_wall, gex_status
             ),
         )
+
+    @staticmethod
+    def _mock_pinning(
+        seed: int,
+        stock_price: float,
+        call_wall: float,
+        put_wall: float,
+        gex_status: GEXStatus,
+    ) -> PinningAnalysis | None:
+        """示意用的合成 Pinning 卡片——跟其他 mock 欄位一樣，用 ticker 的
+        hash 決定性地產生，而不是硬寫死一組固定值，讓不同標的看起來不會
+        完全一樣。實際評分邏輯呼叫跟真實 Moomoo 模式完全相同的
+        pinning_engine，只有輸入的期權鏈是編造的三個履約價，不是重新
+        寫一套假算法——避免 mock 卡片跟真實卡片的判斷邏輯兩邊不一致。
+        """
+        pin_strike = round(stock_price + ((seed // 13) % 5) - 2)
+        gex_by_strike = [
+            {"strike": put_wall, "call_oi": 500 + seed % 300, "put_oi": 4000 + seed % 2000},
+            {"strike": pin_strike, "call_oi": 3000 + seed % 3000, "put_oi": 3000 + seed % 3000},
+            {"strike": call_wall, "call_oi": 4000 + seed % 2000, "put_oi": 500 + seed % 300},
+        ]
+        result = pinning_engine.compute_pinning_analysis(
+            gex_by_strike, stock_price, max_pain=pin_strike,
+            call_wall=call_wall, put_wall=put_wall,
+            in_positive_gamma=(gex_status == GEXStatus.POS_GAMMA),
+        )
+        return PinningAnalysis(**result) if result else None
 
     async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
         today = datetime.now(timezone.utc).date()
@@ -226,7 +264,9 @@ class MoomooMarketDataClient(MarketDataClient):
             )
             if not contracts:
                 raise RuntimeError("Option chain did not contain contracts")
-            return self.calculator.calculate(ticker, stock_price, contracts)
+            summary = self.calculator.calculate(ticker, stock_price, contracts)
+            pinning = compute_pinning_for_contracts(contracts, summary)
+            return summary.model_copy(update={"pinning": pinning})
         finally:
             quote_context.close()
 
@@ -261,7 +301,9 @@ class MoomooMarketDataClient(MarketDataClient):
                 )
             if not contracts:
                 raise RuntimeError("Aggregate option chain did not contain contracts")
-            return self.calculator.calculate(ticker, stock_price, contracts)
+            summary = self.calculator.calculate(ticker, stock_price, contracts)
+            pinning = compute_pinning_for_contracts(contracts, summary)
+            return summary.model_copy(update={"pinning": pinning})
         finally:
             quote_context.close()
 
