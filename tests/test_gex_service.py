@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import date
 from unittest.mock import AsyncMock
 
@@ -77,3 +78,72 @@ async def test_get_expirations_survives_cloud_sync_failure() -> None:
     await asyncio.sleep(0)  # let the failing fire-and-forget task run and get caught
 
     assert expirations[0].days_to_expiration == 6
+
+
+@pytest.mark.asyncio
+async def test_poller_repushes_expirations_even_on_local_cache_hit() -> None:
+    """The whole reason the poller re-pushes expirations every cycle is that
+    the cloud's cache TTL is shorter than a realistic poll interval, so a
+    single push (fired only on a local cache miss) goes stale on the cloud
+    side well before the ticker stops being "active" locally. This must
+    still re-push even when get_expirations() hits its own local cache
+    (i.e. does no fresh Moomoo fetch) — that's the whole point of pulling
+    the push out of the miss-only branch.
+    """
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+    )
+
+    await service.get_expirations("AAPL")  # first call: cache miss, pushes once
+    await asyncio.sleep(0)
+    await service._refresh_expirations_for_poller("AAPL")  # simulated next poll tick
+    await asyncio.sleep(0)
+
+    assert cloud_sync.push_expirations.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_poller_refreshes_expirations_once_per_unique_ticker(monkeypatch) -> None:
+    """Expirations are keyed by ticker only, not ticker+DTE — if the same
+    ticker is active at two different DTEs, the poller should still only
+    refresh/push its expirations once per cycle, not once per active pair.
+    """
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+        active_window_seconds=300,
+    )
+    service._active[("AAPL", 6)] = time.monotonic()
+    service._active[("AAPL", 13)] = time.monotonic()
+
+    refresh_calls = []
+
+    async def fake_refresh(ticker, dte):
+        refresh_calls.append((ticker, dte))
+
+    monkeypatch.setattr(service, "_refresh", fake_refresh)
+
+    real_sleep = asyncio.sleep
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.run_poller(poll_seconds=10)
+    await real_sleep(0)  # let the fire-and-forget cloud push task run
+
+    assert len(refresh_calls) == 2  # both active (ticker, dte) pairs refreshed
+    assert cloud_sync.push_expirations.await_count == 1  # but only 1 unique ticker

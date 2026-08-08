@@ -59,9 +59,13 @@ class GEXService:
                 return OptionGEXSummary.model_validate_json(cached)
             return await self._refresh(ticker, days_to_expiration)
 
+    @staticmethod
+    def _expirations_cache_key(ticker: str) -> str:
+        return f"expirations:v1:{ticker}"
+
     async def get_expirations(self, ticker: str) -> list[ExpirationInfo]:
         ticker = ticker.strip().upper()
-        key = f"expirations:v1:{ticker}"
+        key = self._expirations_cache_key(ticker)
         cached = await self.cache.get(key)
         if cached:
             return _EXPIRATIONS_ADAPTER.validate_json(cached)
@@ -154,6 +158,36 @@ class GEXService:
                         days_to_expiration,
                         exc_info=True,
                     )
+            # Expirations are keyed by ticker only (not ticker+DTE), so this
+            # only needs to run once per unique active ticker per cycle, not
+            # once per active (ticker, DTE) pair — and it deliberately
+            # re-pushes every cycle regardless of local cache hit/miss.
+            # get_expirations()'s own cloud push only fires on a fresh
+            # fetch, but the cloud cache TTL (cache_ttl_seconds, 30s by
+            # default) is shorter than a realistic poll_seconds, so a
+            # single push goes stale well before the ticker stops being
+            # "active" — this keeps the cloud's copy continuously warm for
+            # as long as someone is actually looking at it locally.
+            for ticker in {t for t, _ in self._active.keys()}:
+                try:
+                    await self._refresh_expirations_for_poller(ticker)
+                except Exception:
+                    logger.warning(
+                        "Poller expirations refresh failed for %s", ticker, exc_info=True
+                    )
+
+    async def _refresh_expirations_for_poller(self, ticker: str) -> None:
+        """Unlike get_expirations(), this always re-pushes to keep the
+        cloud's copy warm, even on a local cache hit — that's the whole
+        point of calling it from the poller (see run_poller's docstring).
+        A local cache MISS already pushes once inside get_expirations()
+        itself, so this skips its own push in that case to avoid firing
+        the same push twice back to back.
+        """
+        was_cached = await self.cache.get(self._expirations_cache_key(ticker)) is not None
+        expirations = await self.get_expirations(ticker)
+        if was_cached and self.cloud_sync and self.market_data.active_mode == "moomoo":
+            asyncio.create_task(self._push_expirations_to_cloud(ticker, expirations))
 
     async def _push_to_cloud(
         self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
