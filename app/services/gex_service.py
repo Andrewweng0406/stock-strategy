@@ -69,6 +69,8 @@ class GEXService:
         await self.cache.set(
             key, _EXPIRATIONS_ADAPTER.dump_json(expirations).decode(), self.ttl_seconds
         )
+        if self.cloud_sync and self.market_data.active_mode == "moomoo":
+            asyncio.create_task(self._push_expirations_to_cloud(ticker, expirations))
         return expirations
 
     async def get_aggregate_summary(
@@ -161,6 +163,17 @@ class GEXService:
             await self.cloud_sync.push(ticker, days_to_expiration, summary)
         except Exception:
             logger.warning("Cloud sync task failed for %s", ticker, exc_info=True)
+
+    async def _push_expirations_to_cloud(
+        self, ticker: str, expirations: list[ExpirationInfo]
+    ) -> None:
+        assert self.cloud_sync is not None
+        try:
+            await self.cloud_sync.push_expirations(ticker, expirations)
+        except Exception:
+            logger.warning(
+                "Cloud sync expirations task failed for %s", ticker, exc_info=True
+            )
 
     async def _maybe_snapshot(
         self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary

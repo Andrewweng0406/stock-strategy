@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
+from pydantic import TypeAdapter
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -40,18 +41,23 @@ from app.models import (
     ChatResponse,
     ConversationList,
     ConversationMessages,
+    ExpirationInfo,
     ExpirationList,
     GEXSnapshotList,
     HealthResponse,
     OptionGEXSummary,
     PlanList,
     SavePlanRequest,
+    SyncExpirationsRequest,
     SyncGexRequest,
     UserProfile,
     UserProfileUpdate,
     UserTradePlan,
 )
 from app.services import CloudSync, GEXService, LLMOrchestrator
+
+
+_EXPIRATIONS_ADAPTER = TypeAdapter(list[ExpirationInfo])
 
 
 logging.basicConfig(
@@ -309,6 +315,34 @@ async def sync_gex(
     key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
     await services.cache.set(
         key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
+    )
+    return {"status": "synced"}
+
+
+@app.post("/api/v1/sync/expirations")
+async def sync_expirations(
+    payload: SyncExpirationsRequest,
+    services: Services,
+    x_sync_token: str = Header(default=""),
+) -> dict[str, str]:
+    """Companion to /api/v1/sync/gex — without this, the cloud deployment's
+    own /api/v1/expirations always falls back to MockMarketDataClient's
+    synthetic dates (its own primary Moomoo connection never succeeds
+    here), so the frontend's default-selected expiration almost never lines
+    up with a days_to_expiration the local instance has actually pushed
+    real GEX data for, and the cloud UI keeps showing mock numbers on
+    first load even after a real push.
+    """
+    if not settings.sync_token or not hmac.compare_digest(
+        x_sync_token, settings.sync_token
+    ):
+        raise HTTPException(status_code=403, detail="Invalid sync token")
+    ticker = payload.ticker.strip().upper()
+    key = f"expirations:v1:{ticker}"
+    await services.cache.set(
+        key,
+        _EXPIRATIONS_ADAPTER.dump_json(payload.expirations).decode(),
+        settings.cache_ttl_seconds,
     )
     return {"status": "synced"}
 
