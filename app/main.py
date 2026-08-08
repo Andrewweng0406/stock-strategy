@@ -35,6 +35,7 @@ from app.market_data import (
     FallbackMarketDataClient,
     MockMarketDataClient,
     MoomooMarketDataClient,
+    YFinanceMarketDataClient,
 )
 from app.models import (
     ChatRequest,
@@ -91,19 +92,29 @@ async def lifespan(app: FastAPI):
 
     calculator = GEXCalculator(settings.risk_free_rate)
     mock = MockMarketDataClient()
-    primary = (
-        MoomooMarketDataClient(
+    if settings.moomoo_enabled:
+        # Local instance: real brokerage connection, real credentials,
+        # never leaves this machine.
+        primary = MoomooMarketDataClient(
             settings.moomoo_host, settings.moomoo_port, calculator,
             settings.moomoo_connect_timeout_seconds,
         )
-        if settings.moomoo_enabled
-        else mock
-    )
-    market_data = FallbackMarketDataClient(
-        primary,
-        mock,
-        primary_mode="moomoo" if settings.moomoo_enabled else "mock",
-    )
+        primary_mode = "moomoo"
+    elif settings.yfinance_fallback_enabled:
+        # Cloud instance: no credentials to hold, so no Moomoo connection
+        # is even attempted here — yfinance needs no login and can safely
+        # run on a third-party host, at the cost of delayed data and no
+        # broker Greeks. Real-time data still reaches the cloud through
+        # CloudSync pushes from the local instance when it's active; this
+        # is what serves everything else.
+        primary = YFinanceMarketDataClient(
+            calculator, settings.yfinance_min_request_interval_seconds,
+        )
+        primary_mode = "yfinance"
+    else:
+        primary = mock
+        primary_mode = "mock"
+    market_data = FallbackMarketDataClient(primary, mock, primary_mode=primary_mode)
     cache = ResilientCache(settings.redis_url)
     openai_client = (
         AsyncOpenAI(api_key=settings.openai_api_key)

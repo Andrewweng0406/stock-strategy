@@ -1,12 +1,14 @@
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from app.analytics import GEXCalculator
 from app.market_data import (
     MockMarketDataClient,
     MoomooMarketDataClient,
+    YFinanceMarketDataClient,
     _is_third_friday,
     classify_expiration,
 )
@@ -117,3 +119,156 @@ def test_moomoo_client_sets_a_bounded_connect_timeout() -> None:
 
     mock_context.set_sync_query_connect_timeout.assert_called_once_with(8.0)
     assert result is mock_context
+
+
+# ---------- YFinanceMarketDataClient ----------
+
+def _option_chain_frame(strikes_oi_iv: list[tuple[float, int, float]]) -> pd.DataFrame:
+    return pd.DataFrame({
+        "strike": [s for s, _, _ in strikes_oi_iv],
+        "openInterest": [oi for _, oi, _ in strikes_oi_iv],
+        "impliedVolatility": [iv for _, _, iv in strikes_oi_iv],
+        "contractSymbol": [f"TEST{s}" for s, _, _ in strikes_oi_iv],
+    })
+
+
+def _fake_yf_ticker(
+    close_price: float = 100.0,
+    options: tuple[str, ...] = ("2026-08-14",),
+    calls: pd.DataFrame | None = None,
+    puts: pd.DataFrame | None = None,
+    history_raises: bool = False,
+) -> MagicMock:
+    handle = MagicMock()
+    if history_raises:
+        handle.history.side_effect = ConnectionError("network down")
+    else:
+        handle.history.return_value = pd.DataFrame({"Close": [close_price]})
+    handle.fast_info = {"lastPrice": close_price}
+    handle.options = options
+    chain = MagicMock()
+    chain.calls = calls if calls is not None else _option_chain_frame([(100.0, 500, 0.4)])
+    chain.puts = puts if puts is not None else _option_chain_frame([(100.0, 500, 0.4)])
+    handle.option_chain.return_value = chain
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_yfinance_client_computes_gex_summary_from_option_chain() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = _fake_yf_ticker(
+        close_price=100.0,
+        calls=_option_chain_frame([(105.0, 4000, 0.4)]),
+        puts=_option_chain_frame([(95.0, 4000, 0.4)]),
+    )
+    with patch("yfinance.Ticker", return_value=handle):
+        summary = await client.get_gex_summary("AAPL", 6)
+
+    assert summary.ticker == "AAPL"
+    assert summary.stock_price == 100.0
+    assert summary.pinning is not None
+
+
+@pytest.mark.asyncio
+async def test_yfinance_client_falls_back_to_fast_info_when_history_fails() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = _fake_yf_ticker(close_price=250.0, history_raises=True)
+    with patch("yfinance.Ticker", return_value=handle):
+        summary = await client.get_gex_summary("MSFT", 6)
+
+    assert summary.stock_price == 250.0
+
+
+@pytest.mark.asyncio
+async def test_yfinance_client_raises_clear_error_when_totally_unavailable() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = MagicMock()
+    handle.history.side_effect = ConnectionError("network down")
+    handle.fast_info = {}
+    with patch("yfinance.Ticker", return_value=handle):
+        with pytest.raises(RuntimeError, match="no spot price"):
+            await client.get_gex_summary("AAPL", 6)
+
+
+def test_yfinance_client_skips_contracts_with_invalid_strike_or_zero_oi() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    calls = _option_chain_frame([(105.0, 4000, 0.4), (0.0, 500, 0.4), (110.0, 0, 0.4)])
+    puts = _option_chain_frame([(95.0, 4000, 0.4)])
+    handle = _fake_yf_ticker(close_price=100.0, calls=calls, puts=puts)
+    with patch("yfinance.Ticker", return_value=handle):
+        contracts = client._contracts_for_expiration_sync("AAPL", date(2026, 8, 14))
+
+    strikes = sorted(c.strike for c in contracts)
+    assert strikes == [95.0, 105.0]  # zero-strike and zero-OI rows dropped
+
+
+def test_yfinance_client_leaves_market_gamma_zero_so_calculator_uses_black_scholes() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = _fake_yf_ticker(close_price=100.0)
+    with patch("yfinance.Ticker", return_value=handle):
+        contracts = client._contracts_for_expiration_sync("AAPL", date(2026, 8, 14))
+
+    assert all(c.market_gamma == 0.0 and c.delta == 0.0 for c in contracts)
+
+
+def test_yfinance_client_expirations_are_sorted_and_deduplicated() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = _fake_yf_ticker(options=("2026-08-21", "2026-08-14", "2026-08-14"))
+    with patch("yfinance.Ticker", return_value=handle):
+        dates = client._expiration_dates_sync("AAPL")
+
+    assert dates == [date(2026, 8, 14), date(2026, 8, 21)]
+
+
+@pytest.mark.asyncio
+async def test_yfinance_client_selects_expiration_closest_to_requested_dte() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    today = date.today()
+    near = (today + timedelta(days=2)).isoformat()
+    far = (today + timedelta(days=30)).isoformat()
+    handle = _fake_yf_ticker(close_price=100.0, options=(near, far))
+    with patch("yfinance.Ticker", return_value=handle):
+        await client.get_gex_summary("AAPL", 30)
+        called_with = handle.option_chain.call_args.args[0]
+
+    assert called_with == far
+
+
+def test_yfinance_client_throttle_enforces_minimum_interval(monkeypatch) -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.5)
+    monkeypatch.setattr(client, "_last_request_at", 100.0)
+
+    fake_now = [100.1]
+    import app.market_data as market_data_module
+    monkeypatch.setattr(market_data_module.time, "monotonic", lambda: fake_now[0])
+    sleep_calls = []
+    monkeypatch.setattr(market_data_module.time, "sleep", lambda s: sleep_calls.append(s))
+
+    client._throttle()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(0.4, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_yfinance_client_aggregate_combines_multiple_expirations() -> None:
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = YFinanceMarketDataClient(calculator, min_request_interval_seconds=0.0)
+    handle = _fake_yf_ticker(
+        close_price=100.0,
+        calls=_option_chain_frame([(105.0, 4000, 0.4)]),
+        puts=_option_chain_frame([(95.0, 4000, 0.4)]),
+    )
+    with patch("yfinance.Ticker", return_value=handle):
+        summary = await client.get_gex_summary_multi("AAPL", [date(2026, 8, 14), date(2026, 8, 21)])
+
+    assert summary.stock_price == 100.0
+    assert handle.option_chain.call_count == 2

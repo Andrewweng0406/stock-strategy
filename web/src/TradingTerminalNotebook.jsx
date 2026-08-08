@@ -1290,10 +1290,13 @@ function HealthBadge({ health, baseUrl }) {
     label = "測試中…";
   } else if (health.state === "ok" && health.mode === "moomoo") {
     dot = "#2fa37a";
-    label = "已連線至 Moomoo 後端";
-  } else if (health.state === "ok") {
+    label = "已連線至 Moomoo 後端（即時）";
+  } else if (health.state === "ok" && health.mode === "yfinance") {
     dot = "#c9a15c";
-    label = `已連線（${health.mode || "mock"} 模式）`;
+    label = "已連線（Yahoo Finance · 約 15-20 分鐘延遲）";
+  } else if (health.state === "ok") {
+    dot = "#8d8d93";
+    label = `已連線（${health.mode || "mock"} 模式 · 非真實資料）`;
   } else if (health.state === "error") {
     dot = "#d8622b";
     label = "連線失敗";

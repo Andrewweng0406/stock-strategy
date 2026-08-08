@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     # FallbackMarketDataClient's mock data. This bounds that wait so the
     # fallback stays fast, which is the entire point of having one.
     moomoo_connect_timeout_seconds: float = 8.0
+    # When Moomoo is disabled (the cloud deployment — OpenD needs real
+    # brokerage login credentials, which never leave the local machine),
+    # fall back to yfinance instead of going straight to synthetic mock
+    # data. yfinance needs no login/credentials at all, so this is safe to
+    # run anywhere; the tradeoff is ~15-20min delayed data and no
+    # broker-calculated Greeks (GEXCalculator computes Black-Scholes gamma
+    # itself in that case — see YFinanceMarketDataClient's docstring).
+    yfinance_fallback_enabled: bool = True
+    yfinance_min_request_interval_seconds: float = 0.5
     risk_free_rate: float = 0.045
 
     # Cloud sync: when both are set, this instance pushes real (non-mock) GEX
