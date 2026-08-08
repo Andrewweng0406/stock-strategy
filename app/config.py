@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     moomoo_enabled: bool = True
     moomoo_host: str = "127.0.0.1"
     moomoo_port: int = 11111
+    # futu-api's OpenQuoteContext has no connect timeout by default (auto
+    # reconnect keeps retrying forever) — a sync call issued while OpenD
+    # isn't reachable (not started yet, still logging in, network hiccup)
+    # would otherwise hang indefinitely instead of promptly failing over to
+    # FallbackMarketDataClient's mock data. This bounds that wait so the
+    # fallback stays fast, which is the entire point of having one.
+    moomoo_connect_timeout_seconds: float = 8.0
     risk_free_rate: float = 0.045
 
     # Cloud sync: when both are set, this instance pushes real (non-mock) GEX

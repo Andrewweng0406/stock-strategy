@@ -86,7 +86,8 @@ async def lifespan(app: FastAPI):
     mock = MockMarketDataClient()
     primary = (
         MoomooMarketDataClient(
-            settings.moomoo_host, settings.moomoo_port, calculator
+            settings.moomoo_host, settings.moomoo_port, calculator,
+            settings.moomoo_connect_timeout_seconds,
         )
         if settings.moomoo_enabled
         else mock

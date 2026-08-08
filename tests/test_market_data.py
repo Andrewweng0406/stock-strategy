@@ -1,8 +1,15 @@
 from datetime import date, timedelta
+from unittest.mock import patch
 
 import pytest
 
-from app.market_data import MockMarketDataClient, _is_third_friday, classify_expiration
+from app.analytics import GEXCalculator
+from app.market_data import (
+    MockMarketDataClient,
+    MoomooMarketDataClient,
+    _is_third_friday,
+    classify_expiration,
+)
 from app.models import ExpirationType
 
 
@@ -89,3 +96,24 @@ async def test_mock_client_aggregate_inherits_pinning_from_base() -> None:
     single = await client.get_gex_summary("AAPL", 30)
     aggregate = await client.get_gex_summary_multi("AAPL", [date(2026, 8, 21)])
     assert aggregate.pinning.model_dump() == single.pinning.model_dump()
+
+
+def test_moomoo_client_sets_a_bounded_connect_timeout() -> None:
+    """futu-api's OpenQuoteContext has no connect timeout by default and
+    auto-reconnects forever, so a sync call issued while OpenD isn't
+    reachable would hang indefinitely instead of promptly raising for
+    FallbackMarketDataClient to catch and fail over to mock data. Without
+    calling set_sync_query_connect_timeout(), that fallback isn't actually
+    prompt — this is a real gap found while checking Moomoo reliability
+    ahead of Monday's market open.
+    """
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = MoomooMarketDataClient(
+        "127.0.0.1", 11111, calculator, connect_timeout_seconds=8.0
+    )
+    with patch("futu.OpenQuoteContext") as mock_context_cls:
+        mock_context = mock_context_cls.return_value
+        result = client._quote_context()
+
+    mock_context.set_sync_query_connect_timeout.assert_called_once_with(8.0)
+    assert result is mock_context

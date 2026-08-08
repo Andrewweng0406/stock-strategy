@@ -140,10 +140,17 @@ class MockMarketDataClient(MarketDataClient):
 
 
 class MoomooMarketDataClient(MarketDataClient):
-    def __init__(self, host: str, port: int, calculator: GEXCalculator) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        calculator: GEXCalculator,
+        connect_timeout_seconds: float = 8.0,
+    ) -> None:
         self.host = host
         self.port = port
         self.calculator = calculator
+        self.connect_timeout_seconds = connect_timeout_seconds
 
     @staticmethod
     def _normalize_ticker(ticker: str) -> str:
@@ -161,7 +168,13 @@ class MoomooMarketDataClient(MarketDataClient):
     def _quote_context(self):
         from futu import OpenQuoteContext
 
-        return OpenQuoteContext(host=self.host, port=self.port)
+        context = OpenQuoteContext(host=self.host, port=self.port)
+        # Without this, a sync call issued while OpenD isn't reachable hangs
+        # indefinitely (futu-api's auto-reconnect has no ceiling by default)
+        # instead of promptly raising so FallbackMarketDataClient can fail
+        # over to mock data — see app/config.py's moomoo_connect_timeout_seconds.
+        context.set_sync_query_connect_timeout(self.connect_timeout_seconds)
+        return context
 
     def _stock_price_sync(self, quote_context: Any, code: str) -> float:
         from futu import RET_OK
