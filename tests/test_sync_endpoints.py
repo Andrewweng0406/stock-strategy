@@ -72,3 +72,64 @@ def test_sync_expirations_round_trips_through_expirations_endpoint(monkeypatch) 
     body = expirations_response.json()
     assert body["ticker"] == "SYNCTEST"
     assert [e["date"] for e in body["expirations"]] == ["2026-08-14", "2026-08-21"]
+
+
+def test_sync_gex_aggregate_rejects_missing_token() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "SYNCTEST",
+                "expiration_dates": ["2026-08-14", "2026-08-21"],
+                "summary": _summary_payload(),
+            },
+        )
+    assert response.status_code == 403
+
+
+def test_sync_gex_aggregate_round_trips_through_aggregate_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "SYNCTEST",
+                "expiration_dates": ["2026-08-14", "2026-08-21"],
+                "summary": _summary_payload(),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+        assert sync_response.status_code == 200
+
+        aggregate_response = client.get(
+            "/api/v1/gex/SYNCTEST/aggregate",
+            params={"expirations": ["2026-08-14", "2026-08-21"]},
+        )
+    assert aggregate_response.status_code == 200
+    assert aggregate_response.json()["stock_price"] == 250.0
+
+
+def test_sync_gex_aggregate_cache_key_ignores_date_order(monkeypatch) -> None:
+    """get_aggregate_summary() sorts+dedupes dates before building its cache
+    key, so a sync push and a later request that list the same dates in a
+    different order must still land on / read from the same cache entry.
+    """
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "SYNCTEST",
+                "expiration_dates": ["2026-08-21", "2026-08-14"],  # reversed order
+                "summary": _summary_payload(),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+        assert sync_response.status_code == 200
+
+        aggregate_response = client.get(
+            "/api/v1/gex/SYNCTEST/aggregate",
+            params={"expirations": ["2026-08-14", "2026-08-21"]},
+        )
+    assert aggregate_response.status_code == 200
+    assert aggregate_response.json()["stock_price"] == 250.0

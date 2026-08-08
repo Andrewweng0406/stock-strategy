@@ -48,6 +48,7 @@ from app.models import (
     OptionGEXSummary,
     PlanList,
     SavePlanRequest,
+    SyncAggregateGexRequest,
     SyncExpirationsRequest,
     SyncGexRequest,
     UserProfile,
@@ -343,6 +344,34 @@ async def sync_expirations(
         key,
         _EXPIRATIONS_ADAPTER.dump_json(payload.expirations).decode(),
         settings.cache_ttl_seconds,
+    )
+    return {"status": "synced"}
+
+
+@app.post("/api/v1/sync/gex/aggregate")
+async def sync_gex_aggregate(
+    payload: SyncAggregateGexRequest,
+    services: Services,
+    x_sync_token: str = Header(default=""),
+) -> dict[str, str]:
+    """Companion to /api/v1/sync/gex for Aggregate GEX mode. That mode is
+    deliberately excluded from the poller's continuous refresh (see
+    GEXService.get_aggregate_summary's docstring — polling it would trip
+    Moomoo/Futu's option-chain rate limit), so without this endpoint the
+    cloud deployment never receives real aggregate data at all, not even
+    once — the frontend's Aggregate GEX view stays on mock permanently
+    regardless of how much real data the local instance has pushed for
+    single-expiration views.
+    """
+    if not settings.sync_token or not hmac.compare_digest(
+        x_sync_token, settings.sync_token
+    ):
+        raise HTTPException(status_code=403, detail="Invalid sync token")
+    ticker = payload.ticker.strip().upper()
+    dates_key = ",".join(d.isoformat() for d in sorted(set(payload.expiration_dates)))
+    key = f"gex:agg:v1:{ticker}:{dates_key}"
+    await services.cache.set(
+        key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
     )
     return {"status": "synced"}
 

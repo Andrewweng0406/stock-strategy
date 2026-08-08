@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 import httpx
 
@@ -64,4 +65,36 @@ class CloudSync:
         except Exception:
             logger.warning(
                 "Cloud sync expirations push failed for %s", ticker, exc_info=True
+            )
+
+    async def push_aggregate(
+        self, ticker: str, expiration_dates: list[date], summary: OptionGEXSummary
+    ) -> None:
+        """Aggregate GEX (get_aggregate_summary) is deliberately kept out of
+        the poller's continuous refresh — it walks one full option chain per
+        expiration, and Moomoo/Futu caps that specific call at 10/30s, so
+        polling it every 10s the way single-DTE summaries are kept warm
+        would trip that limit almost immediately. This still pushes once,
+        right after a fresh (non-cached) compute — same one-shot treatment
+        the local cache itself already gives aggregate results (a 30s TTL,
+        refreshed only on the next explicit request, not proactively) — so
+        the cloud stops being permanently stuck on mock for aggregate mode
+        without reintroducing the rate-limit risk.
+        """
+        payload = {
+            "ticker": ticker,
+            "expiration_dates": [d.isoformat() for d in expiration_dates],
+            "summary": summary.model_dump(mode="json"),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"{self.url}/api/v1/sync/gex/aggregate",
+                    json=payload,
+                    headers={"X-Sync-Token": self.token},
+                )
+                response.raise_for_status()
+        except Exception:
+            logger.warning(
+                "Cloud sync aggregate push failed for %s", ticker, exc_info=True
             )

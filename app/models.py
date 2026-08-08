@@ -151,6 +151,12 @@ class SyncExpirationsRequest(StrictModel):
     expirations: list[ExpirationInfo] = Field(max_length=100)
 
 
+class SyncAggregateGexRequest(StrictModel):
+    ticker: str = Field(min_length=1, max_length=32)
+    expiration_dates: list[date] = Field(min_length=1, max_length=6)
+    summary: OptionGEXSummary
+
+
 class HealthResponse(StrictModel):
     status: str
     market_data_mode: str

@@ -6,8 +6,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.cache import InMemoryCache
-from app.models import ExpirationInfo, ExpirationType
+from app.models import ExpirationInfo, ExpirationType, GEXStatus, OptionGEXSummary
 from app.services.gex_service import GEXService
+
+
+def _fake_summary(ticker: str = "AAPL") -> OptionGEXSummary:
+    return OptionGEXSummary(
+        ticker=ticker, stock_price=100.0, zero_gamma=95.0, call_wall=105.0,
+        put_wall=95.0, iv_rank=40.0, net_gex=1_000_000.0, gex_status=GEXStatus.POS_GAMMA,
+    )
 
 
 class _FakeMarketData:
@@ -23,7 +30,7 @@ class _FakeMarketData:
         raise NotImplementedError
 
     async def get_gex_summary_multi(self, ticker: str, expiration_dates: list[date]):
-        raise NotImplementedError
+        return _fake_summary(ticker)
 
 
 @pytest.mark.asyncio
@@ -147,3 +154,94 @@ async def test_run_poller_refreshes_expirations_once_per_unique_ticker(monkeypat
 
     assert len(refresh_calls) == 2  # both active (ticker, dte) pairs refreshed
     assert cloud_sync.push_expirations.await_count == 1  # but only 1 unique ticker
+
+
+@pytest.mark.asyncio
+async def test_get_aggregate_summary_pushes_to_cloud_when_real_mode() -> None:
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+    )
+
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 21), date(2026, 8, 14)])
+    await asyncio.sleep(0)
+
+    cloud_sync.push_aggregate.assert_awaited_once()
+    call_args = cloud_sync.push_aggregate.await_args
+    assert call_args.args[0] == "AAPL"
+    assert call_args.args[1] == [date(2026, 8, 14), date(2026, 8, 21)]  # sorted
+
+
+@pytest.mark.asyncio
+async def test_get_aggregate_summary_does_not_push_in_mock_mode() -> None:
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("mock"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+    )
+
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 14)])
+
+    cloud_sync.push_aggregate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_aggregate_summary_does_not_push_again_on_cache_hit() -> None:
+    """Unlike expirations, aggregate mode is deliberately NOT kept warm by
+    the poller (rate-limit risk — see get_aggregate_summary's docstring),
+    so a cached result should push zero additional times, not re-push.
+    """
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+    )
+
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 14)])
+    await asyncio.sleep(0)
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 14)])  # cache hit
+    await asyncio.sleep(0)
+
+    assert cloud_sync.push_aggregate.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_poller_never_touches_aggregate_cache() -> None:
+    """Aggregate GEX must stay completely outside the poller loop — the
+    whole reason it was excluded is Moomoo/Futu's 10-calls/30s option-chain
+    rate limit; polling it on the same cadence as single-DTE summaries
+    would trip that limit almost immediately.
+    """
+    cloud_sync = AsyncMock()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        cloud_sync=cloud_sync,
+        active_window_seconds=300,
+    )
+    service._active[("AAPL", 6)] = time.monotonic()
+
+    async def fake_refresh(ticker, dte):
+        return None
+
+    import unittest.mock as mock
+    with mock.patch.object(service, "_refresh", fake_refresh):
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(_seconds):
+            raise asyncio.CancelledError
+
+        with mock.patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await service.run_poller(poll_seconds=10)
+        await real_sleep(0)
+
+    cloud_sync.push_aggregate.assert_not_awaited()

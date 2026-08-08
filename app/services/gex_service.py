@@ -81,9 +81,19 @@ class GEXService:
         self, ticker: str, expiration_dates: list[date]
     ) -> OptionGEXSummary:
         """Combined GEX across several expirations at once. Deliberately
-        outside the poller/cloud-sync path — it walks one full option chain
-        per expiration, so it's meaningfully more expensive than a single
-        lookup and is only ever computed on an explicit user request.
+        outside the poller's continuous refresh — it walks one full option
+        chain per expiration, so it's meaningfully more expensive than a
+        single lookup and is only ever computed on an explicit user
+        request; polling it every poll_seconds the way single-DTE summaries
+        are kept warm would trip Moomoo/Futu's 10/30s option-chain rate
+        limit almost immediately.
+
+        Still pushes to cloud_sync once per fresh (non-cached) compute —
+        same one-shot treatment the local cache itself already gives this
+        result (bounded by ttl_seconds, refreshed only on the next explicit
+        request, never proactively) — so the cloud isn't permanently stuck
+        on mock for aggregate mode just because it's excluded from the
+        poller.
         """
         ticker = ticker.strip().upper()
         sorted_dates = sorted(set(expiration_dates))
@@ -94,6 +104,10 @@ class GEXService:
             return OptionGEXSummary.model_validate_json(cached)
         summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
         await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
+        if self.cloud_sync and self.market_data.active_mode == "moomoo":
+            asyncio.create_task(
+                self._push_aggregate_to_cloud(ticker, sorted_dates, summary)
+            )
         return summary
 
     def _prune(self) -> None:
@@ -207,6 +221,17 @@ class GEXService:
         except Exception:
             logger.warning(
                 "Cloud sync expirations task failed for %s", ticker, exc_info=True
+            )
+
+    async def _push_aggregate_to_cloud(
+        self, ticker: str, expiration_dates: list[date], summary: OptionGEXSummary
+    ) -> None:
+        assert self.cloud_sync is not None
+        try:
+            await self.cloud_sync.push_aggregate(ticker, expiration_dates, summary)
+        except Exception:
+            logger.warning(
+                "Cloud sync aggregate task failed for %s", ticker, exc_info=True
             )
 
     async def _maybe_snapshot(
