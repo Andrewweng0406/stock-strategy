@@ -124,6 +124,7 @@ async def lifespan(app: FastAPI):
         settings.active_window_seconds,
         snapshot_repository,
         settings.snapshot_interval_seconds,
+        settings.aggregate_cache_ttl_seconds,
     )
     app.state.services = AppServices(
         engine=engine,
@@ -371,7 +372,7 @@ async def sync_gex_aggregate(
     dates_key = ",".join(d.isoformat() for d in sorted(set(payload.expiration_dates)))
     key = f"gex:agg:v1:{ticker}:{dates_key}"
     await services.cache.set(
-        key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
+        key, payload.summary.model_dump_json(), settings.aggregate_cache_ttl_seconds
     )
     return {"status": "synced"}
 

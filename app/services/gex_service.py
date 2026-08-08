@@ -29,6 +29,7 @@ class GEXService:
         active_window_seconds: int = 300,
         snapshot_repository: GEXSnapshotRepository | None = None,
         snapshot_interval_seconds: int = 3600,
+        aggregate_ttl_seconds: int | None = None,
     ) -> None:
         self.market_data = market_data
         self.cache = cache
@@ -37,6 +38,14 @@ class GEXService:
         self.active_window_seconds = active_window_seconds
         self.snapshot_repository = snapshot_repository
         self.snapshot_interval_seconds = snapshot_interval_seconds
+        # Aggregate GEX gets no poller-driven refresh (see
+        # get_aggregate_summary's docstring), so its cache entry has to
+        # live longer than a single-DTE lookup's to have any realistic
+        # chance of still being warm — on the cloud side in particular,
+        # where it's the only thing keeping a synced result from flipping
+        # back to mock within seconds. Defaults to ttl_seconds (old
+        # behavior) when not given explicitly.
+        self.aggregate_ttl_seconds = aggregate_ttl_seconds if aggregate_ttl_seconds is not None else ttl_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # (ticker, days_to_expiration) -> monotonic time last requested by a
         # real caller. Drives the background poller — only tickers/expiries
@@ -90,10 +99,12 @@ class GEXService:
 
         Still pushes to cloud_sync once per fresh (non-cached) compute —
         same one-shot treatment the local cache itself already gives this
-        result (bounded by ttl_seconds, refreshed only on the next explicit
-        request, never proactively) — so the cloud isn't permanently stuck
-        on mock for aggregate mode just because it's excluded from the
-        poller.
+        result (bounded by aggregate_ttl_seconds, refreshed only on the
+        next explicit request, never proactively) — so the cloud isn't
+        permanently stuck on mock for aggregate mode just because it's
+        excluded from the poller. aggregate_ttl_seconds is deliberately
+        longer than ttl_seconds (see __init__) so a synced result has a
+        realistic chance of still being warm the next time someone looks.
         """
         ticker = ticker.strip().upper()
         sorted_dates = sorted(set(expiration_dates))
@@ -103,7 +114,7 @@ class GEXService:
         if cached:
             return OptionGEXSummary.model_validate_json(cached)
         summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
-        await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
+        await self.cache.set(key, summary.model_dump_json(), self.aggregate_ttl_seconds)
         if self.cloud_sync and self.market_data.active_mode == "moomoo":
             asyncio.create_task(
                 self._push_aggregate_to_cloud(ticker, sorted_dates, summary)

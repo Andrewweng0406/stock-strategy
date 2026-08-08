@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     # local frontend last asked for it.
     active_window_seconds: int = 300
 
+    # Aggregate GEX is deliberately excluded from the poller's continuous
+    # refresh (walking one full option chain per expiration risks tripping
+    # Moomoo/Futu's 10-calls/30s limit — see GEXService.get_aggregate_summary),
+    # so on the cloud side its synced cache entry only ever gets refreshed
+    # when the local instance happens to compute that exact same expiration
+    # combination again. cache_ttl_seconds (30s) is far too short a window
+    # for that to realistically happen — real data would flip back to mock
+    # a few seconds after every push. Aggregate results are already the
+    # "expensive, less time-sensitive" view by design, so a longer TTL here
+    # is a natural fit, not a special case: matches active_window_seconds so
+    # a synced aggregate view stays real for as long as a ticker would stay
+    # "active" anyway.
+    aggregate_cache_ttl_seconds: int = 300
+
     # /api/v1/chat is the only endpoint that spends real OpenAI budget per
     # call; cap it per client IP so a bug or abusive client can't run up the
     # bill. slowapi's rate-string format: "<count>/<second|minute|hour|day>".

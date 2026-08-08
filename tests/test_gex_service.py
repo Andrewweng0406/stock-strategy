@@ -245,3 +245,43 @@ async def test_run_poller_never_touches_aggregate_cache() -> None:
         await real_sleep(0)
 
     cloud_sync.push_aggregate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aggregate_summary_cached_with_longer_ttl_than_single_dte() -> None:
+    """Aggregate results get no poller-driven refresh, so their cache entry
+    needs to outlive a single-DTE lookup's — a short TTL here would mean a
+    synced result flips back to mock within seconds on the cloud side (the
+    real bug this was built to fix). Verifies get_aggregate_summary() uses
+    aggregate_ttl_seconds, not the general ttl_seconds, for its cache.set().
+    """
+    cache = AsyncMock()
+    cache.get.return_value = None
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=cache,
+        ttl_seconds=30,
+        aggregate_ttl_seconds=300,
+    )
+
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 14)])
+
+    cache.set.assert_awaited_once()
+    call_args = cache.set.await_args
+    assert call_args.args[2] == 300  # ttl argument, not the 30s default
+
+
+@pytest.mark.asyncio
+async def test_aggregate_ttl_defaults_to_ttl_seconds_when_not_given() -> None:
+    cache = AsyncMock()
+    cache.get.return_value = None
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=cache,
+        ttl_seconds=30,
+    )
+
+    await service.get_aggregate_summary("AAPL", [date(2026, 8, 14)])
+
+    call_args = cache.set.await_args
+    assert call_args.args[2] == 30
