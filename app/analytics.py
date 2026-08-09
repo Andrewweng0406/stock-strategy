@@ -2,8 +2,9 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as clock_time
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from app import pinning_engine
 from app.models import GEXStatus, OptionGEXSummary, PinningAnalysis, RiskProfile
@@ -13,6 +14,76 @@ logger = logging.getLogger(__name__)
 
 
 HIGH_RISK_WARNING = "High risk/high volatility; accelerated theta decay."
+
+# US listed options expire on a US market date at the 4:00 PM ET close, so
+# every "what date is it for expiry-counting purposes" question has to be
+# answered in market time. A bare UTC date is wrong for ~4 hours of every
+# day (after 8pm ET it has already rolled to tomorrow), which flips 1DTE
+# contracts into 0DTE a full session early. Audit timestamps
+# (calculated_at / captured_at / created_at) still use real UTC instants —
+# only DTE-relevant dates live in this timezone.
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
+MARKET_CLOSE = clock_time(16, 0)
+
+# Gamma scales as 1/sqrt(T), so flooring T at one whole calendar day makes a
+# contract expiring in 20 minutes look identical to one expiring tomorrow
+# afternoon and badly understates real 0DTE gamma. Floor at one hour
+# instead: small enough to keep intraday 0DTE meaningful, large enough that
+# a contract minutes from expiry can't divide the whole book by ~zero.
+MIN_YEARS_TO_EXPIRY = 1.0 / (365.0 * 24.0)
+SECONDS_PER_YEAR = 365.0 * 24.0 * 60.0 * 60.0
+
+# Implausible IV quotes (illiquid/no-bid strikes routinely report 1e-5 from
+# yfinance, and stale rows occasionally report several hundred percent) are
+# DROPPED, never clamped. Clamping a 1e-5 reading up to a 1% floor doesn't
+# make it usable — because BS gamma scales as 1/(sigma*sqrt(T)) it invents
+# an enormous fake gamma concentration at exactly the strike whose quote was
+# garbage. Bad rows are excluded the same way zero-OI/zero-strike rows are.
+MIN_PLAUSIBLE_IV = 0.01
+MAX_PLAUSIBLE_IV = 5.0
+
+# The zero-gamma search grid is a fixed window centred on spot rather than
+# one derived from the chain's min/max strike: a single far-dated LEAPS
+# strike used to stretch the window and coarsen the resolution right where
+# it matters. 80 steps per side over +/-15% gives ~0.19% of spot per step.
+ZERO_GAMMA_WINDOW_PCT = 0.15
+ZERO_GAMMA_HALF_STEPS = 80
+
+
+def market_now() -> datetime:
+    """Current instant expressed in US market time (see MARKET_TIMEZONE)."""
+    return datetime.now(MARKET_TIMEZONE)
+
+
+def market_today() -> date:
+    """Today's date as the US options market sees it, not as UTC sees it."""
+    return market_now().date()
+
+
+def expiry_instant(expiration: date) -> datetime:
+    """The moment an expiration actually expires: 4:00 PM US/Eastern."""
+    return datetime.combine(expiration, MARKET_CLOSE, tzinfo=MARKET_TIMEZONE)
+
+
+def years_to_expiry(expiration: date, now: datetime) -> float | None:
+    """Time to expiry in years, or None if it has already expired.
+
+    Returns a real fraction of a year measured to the 4:00 PM ET close, so
+    a 0DTE contract priced at 9:30 AM and the same contract priced at
+    3:00 PM get genuinely different (and correctly larger) gamma. An
+    already-expired contract returns None so callers can exclude it — an
+    expired row has no gamma and should never have been in the chain being
+    priced.
+    """
+    seconds = (expiry_instant(expiration) - now).total_seconds()
+    if seconds <= 0:
+        return None
+    return max(seconds / SECONDS_PER_YEAR, MIN_YEARS_TO_EXPIRY)
+
+
+def is_plausible_iv(iv: float) -> bool:
+    """Whether an implied-volatility quote is inside the usable band."""
+    return MIN_PLAUSIBLE_IV <= iv <= MAX_PLAUSIBLE_IV
 
 
 @dataclass(slots=True)
@@ -46,7 +117,15 @@ def parse_gex_risk_profile(
 
 
 class GEXCalculator:
-    """Calculate GEX using the conventional positive-call/negative-put sign."""
+    """Calculate GEX using the conventional positive-call/negative-put sign.
+
+    One gamma rule is shared by every number this class produces (headline
+    net_gex, the zero-gamma curve, and the walls): broker/market gamma at
+    the current spot where the feed supplies it, recomputed Black-Scholes
+    gamma at every hypothetical spot level away from it. See _gamma(). The
+    two used to be computed on silently different bases and could disagree
+    in sign with each other.
+    """
 
     def __init__(self, risk_free_rate: float) -> None:
         self.risk_free_rate = risk_free_rate
@@ -68,49 +147,91 @@ class GEXCalculator:
     def _gamma(
         self,
         contract: OptionContract,
-        spot: float,
-        valuation_date: date,
-        prefer_market: bool = False,
+        level: float,
+        now: datetime,
+        at_current_spot: bool,
     ) -> float:
-        if prefer_market and contract.market_gamma > 0:
+        """Per-contract gamma at price `level`.
+
+        One rule, applied identically by every caller (see the class
+        docstring): broker/market gamma is a snapshot quantity that is only
+        valid at the *current* spot, so it is used exactly when the price
+        being evaluated IS the current spot, and Black-Scholes gamma is
+        recomputed for every hypothetical price level away from it. That
+        keeps the headline net_gex and the zero-gamma curve on one basis —
+        the curve literally passes through the headline value at spot,
+        because that grid point is computed by this same call.
+        """
+        if at_current_spot and contract.market_gamma > 0:
             return contract.market_gamma
-        days = max((contract.expiration_date - valuation_date).days, 1)
+        years = years_to_expiry(contract.expiration_date, now)
+        if years is None:
+            return 0.0
         return self._bs_gamma(
-            spot, contract.strike, days / 365.0, max(contract.implied_volatility, 0.01)
+            level, contract.strike, years, contract.implied_volatility
         )
 
     def _contract_gex(
         self,
         contract: OptionContract,
-        spot: float,
-        valuation_date: date,
-        prefer_market: bool = False,
+        level: float,
+        now: datetime,
+        at_current_spot: bool,
     ) -> float:
         sign = 1.0 if contract.option_type == "CALL" else -1.0
         return (
             sign
-            * self._gamma(contract, spot, valuation_date, prefer_market)
+            * self._gamma(contract, level, now, at_current_spot)
             * contract.open_interest
             * contract.contract_size
-            * spot**2
+            * level**2
             * 0.01
         )
 
     def _net_at(
-        self, contracts: list[OptionContract], spot: float, valuation_date: date
+        self,
+        contracts: list[OptionContract],
+        level: float,
+        now: datetime,
+        at_current_spot: bool = False,
     ) -> float:
-        return sum(self._contract_gex(c, spot, valuation_date) for c in contracts)
+        """Net dealer gamma exposure if the underlying traded at `level`."""
+        return sum(
+            self._contract_gex(c, level, now, at_current_spot) for c in contracts
+        )
 
     def _zero_gamma(
-        self, contracts: list[OptionContract], spot: float, valuation_date: date
-    ) -> float:
-        strikes = sorted({contract.strike for contract in contracts})
-        if not strikes:
-            return spot
-        lower = min(min(strikes) * 0.9, spot * 0.7)
-        upper = max(max(strikes) * 1.1, spot * 1.3)
-        levels = [lower + (upper - lower) * index / 160 for index in range(161)]
-        values = [self._net_at(contracts, level, valuation_date) for level in levels]
+        self, contracts: list[OptionContract], spot: float, now: datetime
+    ) -> float | None:
+        """The price where net dealer gamma flips sign, or None if it never
+        does inside the searched window.
+
+        None is the honest answer for a chain whose gamma profile has no
+        crossing: there is no such price. The previous behaviour — falling
+        back to whichever grid boundary happened to have the smallest
+        |value| — fabricated a level with no relationship to the real
+        profile. Nothing downstream depends on that fabrication any more:
+        gex_status now comes from the sign of net gamma at spot (see
+        calculate()), never from comparing spot against this value.
+
+        The grid is a fixed +/-ZERO_GAMMA_WINDOW_PCT window centred on spot
+        with spot itself as the midpoint sample, so resolution near spot no
+        longer depends on how far out the chain's widest strike happens to
+        sit.
+        """
+        if spot <= 0 or not contracts:
+            return None
+        step = spot * ZERO_GAMMA_WINDOW_PCT / ZERO_GAMMA_HALF_STEPS
+        levels = [
+            spot + step * offset
+            for offset in range(-ZERO_GAMMA_HALF_STEPS, ZERO_GAMMA_HALF_STEPS + 1)
+        ]
+        values = [
+            self._net_at(
+                contracts, level, now, at_current_spot=(index == ZERO_GAMMA_HALF_STEPS)
+            )
+            for index, level in enumerate(levels)
+        ]
         crossings: list[float] = []
         for index, (left, right) in enumerate(zip(values, values[1:])):
             if left == 0:
@@ -122,26 +243,60 @@ class GEXCalculator:
                 )
         if crossings:
             return min(crossings, key=lambda value: abs(value - spot))
-        return levels[min(range(len(values)), key=lambda index: abs(values[index]))]
+        return None
 
     def _walls(
-        self, contracts: list[OptionContract], spot: float, valuation_date: date
-    ) -> tuple[float, float]:
+        self, contracts: list[OptionContract], spot: float, now: datetime
+    ) -> tuple[float | None, float | None]:
+        """Gamma-weighted OI peaks, constrained to the correct side of spot.
+
+        A Call Wall is resistance *above* the current price and a Put Wall
+        is support *below* it; that is what makes "spot broke the wall"
+        meaningful downstream. Searching all strikes regardless of side let
+        leftover deep-ITM open interest below spot win the call-side argmax
+        and hand the pinning engine a "Call Wall" under the market, which it
+        then read as a breakout. Each side is now restricted to its own half
+        of the chain, and a side with no qualifying strike returns None
+        rather than a wall on the wrong side.
+        """
         calls: dict[float, float] = defaultdict(float)
         puts: dict[float, float] = defaultdict(float)
         for contract in contracts:
-            exposure = abs(
-                self._contract_gex(contract, spot, valuation_date, prefer_market=True)
-            )
-            (calls if contract.option_type == "CALL" else puts)[contract.strike] += exposure
+            exposure = abs(self._contract_gex(contract, spot, now, True))
+            if exposure <= 0:
+                continue
+            if contract.option_type == "CALL":
+                if contract.strike >= spot:
+                    calls[contract.strike] += exposure
+            elif contract.strike <= spot:
+                puts[contract.strike] += exposure
         return (
-            max(calls, key=calls.get, default=spot),
-            max(puts, key=puts.get, default=spot),
+            max(calls, key=calls.get) if calls else None,
+            max(puts, key=puts.get) if puts else None,
         )
 
     @staticmethod
+    def _usable_contracts(
+        contracts: list[OptionContract], now: datetime
+    ) -> list[OptionContract]:
+        """Drop rows that cannot produce a meaningful gamma number.
+
+        Same treatment already given to zero-OI/zero-strike rows: an
+        implausible IV quote or an already-expired contract is excluded
+        outright, never floored or otherwise coerced into the calculation.
+        """
+        return [
+            contract
+            for contract in contracts
+            if contract.strike > 0
+            and contract.open_interest > 0
+            and is_plausible_iv(contract.implied_volatility)
+            and years_to_expiry(contract.expiration_date, now) is not None
+        ]
+
+    @staticmethod
     def _iv_rank_proxy(contracts: list[OptionContract], spot: float) -> float:
-        valid = [c for c in contracts if 0 < c.implied_volatility < 5]
+        valid = [c for c in contracts if is_plausible_iv(c.implied_volatility)]
         if not valid:
             return 50.0
         atm = sorted(valid, key=lambda c: abs(c.strike - spot))[: min(10, len(valid))]
@@ -157,25 +312,28 @@ class GEXCalculator:
     ) -> OptionGEXSummary:
         if not contracts:
             raise ValueError("No valid option contracts were returned")
-        today = datetime.now(timezone.utc).date()
-        zero_gamma = self._zero_gamma(contracts, stock_price, today)
-        call_wall, put_wall = self._walls(contracts, stock_price, today)
-        net_gex = sum(
-            self._contract_gex(c, stock_price, today, prefer_market=True)
-            for c in contracts
-        )
-        status = (
-            GEXStatus.POS_GAMMA
-            if stock_price > zero_gamma
-            else GEXStatus.NEG_GAMMA
-        )
+        now = market_now()
+        usable = self._usable_contracts(contracts, now)
+        if not usable:
+            raise ValueError("No valid option contracts were returned")
+        # The headline number: net dealer gamma at the price the underlying
+        # is actually trading at, using broker gamma wherever it exists.
+        net_gex = self._net_at(usable, stock_price, now, at_current_spot=True)
+        # gex_status is the SIGN of that number, full stop. It must never be
+        # derived from `stock_price > zero_gamma`: when the profile has no
+        # crossing there is no zero_gamma to compare against, and even when
+        # there is one, the comparison is an indirect proxy for a quantity
+        # we already have exactly.
+        status = GEXStatus.POS_GAMMA if net_gex > 0 else GEXStatus.NEG_GAMMA
+        zero_gamma = self._zero_gamma(usable, stock_price, now)
+        call_wall, put_wall = self._walls(usable, stock_price, now)
         return OptionGEXSummary(
             ticker=ticker.upper(),
             stock_price=round(stock_price, 4),
-            zero_gamma=round(zero_gamma, 4),
-            call_wall=round(call_wall, 4),
-            put_wall=round(put_wall, 4),
-            iv_rank=round(self._iv_rank_proxy(contracts, stock_price), 2),
+            zero_gamma=None if zero_gamma is None else round(zero_gamma, 4),
+            call_wall=None if call_wall is None else round(call_wall, 4),
+            put_wall=None if put_wall is None else round(put_wall, 4),
+            iv_rank=round(self._iv_rank_proxy(usable, stock_price), 2),
             net_gex=round(net_gex, 2),
             gex_status=status,
         )

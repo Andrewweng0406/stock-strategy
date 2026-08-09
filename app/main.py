@@ -32,6 +32,7 @@ from app.database import (
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
+    relax_gex_snapshot_level_columns,
 )
 from app.market_data import (
     FallbackMarketDataClient,
@@ -99,6 +100,10 @@ async def lifespan(app: FastAPI):
     )
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        # create_all never alters an existing table, so databases created
+        # before the GEX level columns became nullable need this one-shot
+        # (idempotent) relaxation.
+        await connection.run_sync(relax_gex_snapshot_level_columns)
 
     calculator = GEXCalculator(settings.risk_free_rate)
     mock = MockMarketDataClient()

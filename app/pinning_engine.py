@@ -94,8 +94,8 @@ def score_pinning(
     pin_strike: float | None,
     oi_concentration_pct: float,
     max_pain: float,
-    call_wall: float,
-    put_wall: float,
+    call_wall: float | None,
+    put_wall: float | None,
     in_positive_gamma: bool,
 ) -> dict | None:
     """判斷現貨目前處於「Pinning 釘價區間」還是「突破區間」，並給出 0～100
@@ -145,7 +145,16 @@ def score_pinning(
     score = int(proximity_score + gamma_score + concentration_score + 0.5)
     label = _score_to_label(score)
 
-    has_broken_wall = spot > call_wall or spot < put_wall
+    # A missing Wall is *absence of evidence*, not evidence of a breakout:
+    # call_wall/put_wall are None when the chain simply has no qualifying
+    # strike on that side of spot, which says nothing about whether a
+    # defence line was broken. Only a wall that exists and has been crossed
+    # counts. (Before the walls were constrained to the correct side of
+    # spot, a stray deep-ITM "Call Wall" below the market made this fire a
+    # spurious BREAKOUT; None must not resurrect that failure mode.)
+    has_broken_wall = (call_wall is not None and spot > call_wall) or (
+        put_wall is not None and spot < put_wall
+    )
     is_close_enough = distance_pct <= PIN_PROXIMITY_THRESHOLD_PCT
     is_concentrated_enough = oi_concentration_pct >= PIN_OI_CONCENTRATION_MIN_PCT
 
@@ -173,8 +182,8 @@ def compute_pinning_analysis(
     gex_by_strike: Sequence[dict],
     spot: float,
     max_pain: float,
-    call_wall: float,
-    put_wall: float,
+    call_wall: float | None,
+    put_wall: float | None,
     in_positive_gamma: bool,
 ) -> dict | None:
     """完整版：從一整條當下重新彙總的期權鏈（gex_by_strike）自己找

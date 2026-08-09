@@ -107,14 +107,25 @@ class LLMOrchestrator:
             return "BULLISH"
         return "NEUTRAL"
 
+    # GEX levels are nullable (see app/models.py OptionGEXSummary): a chain
+    # with no gamma crossing has no zero_gamma, and a chain with no strike
+    # on one side of spot has no wall there. A missing level is simply not a
+    # candidate — these helpers drop it and fall back exactly as they would
+    # for a level that sits on the wrong side of price.
     @staticmethod
-    def _nearest_below(price: float, levels: list[float], fallback: float) -> float:
-        candidates = [level for level in levels if 0 < level < price]
+    def _nearest_below(
+        price: float, levels: list[float | None], fallback: float
+    ) -> float:
+        candidates = [
+            level for level in levels if level is not None and 0 < level < price
+        ]
         return max(candidates) if candidates else fallback
 
     @staticmethod
-    def _nearest_above(price: float, levels: list[float], fallback: float) -> float:
-        candidates = [level for level in levels if level > price]
+    def _nearest_above(
+        price: float, levels: list[float | None], fallback: float
+    ) -> float:
+        candidates = [level for level in levels if level is not None and level > price]
         return min(candidates) if candidates else fallback
 
     @classmethod
@@ -122,7 +133,11 @@ class LLMOrchestrator:
         cls, summary: OptionGEXSummary, bias: StrategyBias
     ) -> dict[str, float]:
         price = summary.stock_price
-        levels = [summary.zero_gamma, summary.call_wall, summary.put_wall]
+        levels: list[float | None] = [
+            summary.zero_gamma,
+            summary.call_wall,
+            summary.put_wall,
+        ]
         if bias == "BEARISH":
             stop_reference = cls._nearest_above(price, levels, price * 1.03)
             target = cls._nearest_below(
@@ -380,6 +395,22 @@ precise, probability-aware advice from the authoritative market context below.
         entry_snapshot: GEXSnapshot | None,
         execution_score: int,
     ) -> str:
+        # Levels the calculator couldn't establish are omitted from the JSON
+        # entirely rather than sent as null — behaviour rule 3 below tells
+        # the model to ground GEX references only in what's present here, so
+        # an absent key is the clearest possible "there is no such level".
+        entry_gex_context: dict[str, Any] | None = None
+        if entry_snapshot is not None:
+            entry_gex_context = {
+                key: value
+                for key, value in (
+                    ("zero_gamma", entry_snapshot.zero_gamma_strike),
+                    ("call_wall", entry_snapshot.call_wall_strike),
+                    ("put_wall", entry_snapshot.put_wall_strike),
+                )
+                if value is not None
+            }
+            entry_gex_context["gex_status"] = entry_snapshot.gex_status.value
         context = json.dumps(
             {
                 "ticker": trade.ticker,
@@ -392,16 +423,7 @@ precise, probability-aware advice from the authoritative market context below.
                 "notes": trade.notes,
                 "execution_score": execution_score,
                 "has_source_plan": trade.source_plan_id is not None,
-                "entry_gex_context": (
-                    {
-                        "zero_gamma": entry_snapshot.zero_gamma_strike,
-                        "call_wall": entry_snapshot.call_wall_strike,
-                        "put_wall": entry_snapshot.put_wall_strike,
-                        "gex_status": entry_snapshot.gex_status.value,
-                    }
-                    if entry_snapshot is not None
-                    else None
-                ),
+                "entry_gex_context": entry_gex_context,
             },
             ensure_ascii=True,
         )
@@ -458,6 +480,13 @@ trade. Give a direct, honest post-trade diagnosis.
         else:
             wall_name = "Call/Put Wall"
             wall = summary.call_wall
+        # A level the calculator couldn't establish is shown as "—", never
+        # as a number — the plan's own entry/stop/target already fall back
+        # to percentage offsets via _nearest_below/_nearest_above.
+        wall_text = "—" if wall is None else f"${wall:.2f}"
+        zero_gamma_text = (
+            "—" if summary.zero_gamma is None else f"${summary.zero_gamma:.2f}"
+        )
         risk = abs(plan.entry_price - plan.stop_loss)
         reward = abs(plan.target_price - plan.entry_price)
         ratio = reward / risk if risk else 0.0
@@ -471,7 +500,7 @@ trade. Give a direct, honest post-trade diagnosis.
             lines.append("- 短天期 Theta 加速，避免裸買期權，優先垂直價差。")
         lines.append(
             f"- 依現價 ${summary.stock_price:.2f}、Zero Gamma "
-            f"${summary.zero_gamma:.2f}、{wall_name} ${wall:.2f} 自動出卡。"
+            f"{zero_gamma_text}、{wall_name} {wall_text} 自動出卡。"
         )
         return "\n".join(lines)
 
@@ -491,9 +520,12 @@ trade. Give a direct, honest post-trade diagnosis.
             if summary.gex_status.value == "POS_GAMMA"
             else "順勢波動易放大"
         )
+        zero_gamma_text = (
+            "—" if summary.zero_gamma is None else f"{summary.zero_gamma:.1f}"
+        )
         lines = [
             f"- {summary.gex_status.value}｜NetGEX {net_gex_millions:+.1f}M｜"
-            f"{regime_note}｜ZG {summary.zero_gamma:.1f}"
+            f"{regime_note}｜ZG {zero_gamma_text}"
         ]
         labels = (
             ("A保守", "conservative"),

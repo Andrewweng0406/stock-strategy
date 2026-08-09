@@ -5,13 +5,19 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import Any, Literal
 
 import pandas as pd
 
 from app import pinning_engine
-from app.analytics import GEXCalculator, OptionContract, compute_pinning_for_contracts
+from app.analytics import (
+    GEXCalculator,
+    OptionContract,
+    compute_pinning_for_contracts,
+    is_plausible_iv,
+    market_today,
+)
 from app.models import (
     ExpirationInfo,
     ExpirationType,
@@ -122,7 +128,7 @@ class MockMarketDataClient(MarketDataClient):
         return PinningAnalysis(**result) if result else None
 
     async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
-        today = datetime.now(timezone.utc).date()
+        today = market_today()
         dates = sorted({today, today + timedelta(days=1), *self._next_fridays(today, 8)})
         return [
             ExpirationInfo(
@@ -244,13 +250,18 @@ class MoomooMarketDataClient(MarketDataClient):
                 iv /= 100
             if strike <= 0 or open_interest <= 0:
                 continue
+            # An implausible IV quote is dropped, not floored — see
+            # analytics.is_plausible_iv() for why a 1% floor manufactures
+            # fake gamma concentration instead of salvaging the row.
+            if not is_plausible_iv(iv):
+                continue
             contracts.append(
                 OptionContract(
                     code=str(row.get("code", "")),
                     option_type=option_type,
                     strike=strike,
                     expiration_date=expiration,
-                    implied_volatility=max(iv, 0.01),
+                    implied_volatility=iv,
                     delta=self._number(row.get("option_delta")),
                     market_gamma=self._number(row.get("option_gamma")),
                     open_interest=open_interest,
@@ -267,7 +278,7 @@ class MoomooMarketDataClient(MarketDataClient):
         try:
             stock_price = self._stock_price_sync(quote_context, code)
             available_dates = self._expiration_dates_sync(quote_context, code)
-            today = datetime.now(timezone.utc).date()
+            today = market_today()
             selected = min(
                 available_dates,
                 key=lambda expiry: abs(
@@ -292,7 +303,7 @@ class MoomooMarketDataClient(MarketDataClient):
             dates = self._expiration_dates_sync(quote_context, code)
         finally:
             quote_context.close()
-        today = datetime.now(timezone.utc).date()
+        today = market_today()
         return [
             ExpirationInfo(
                 date=d,
@@ -436,13 +447,19 @@ class YFinanceMarketDataClient(MarketDataClient):
                 iv = self._number(row.get("impliedVolatility"))
                 if strike <= 0 or open_interest <= 0:
                     continue
+                # Yahoo reports ~1e-5 IV on illiquid/no-bid strikes; those
+                # rows are dropped, not floored to 1%, because BS gamma
+                # scales as 1/(sigma*sqrt(T)) and a floored garbage quote
+                # invents a huge gamma spike at that strike.
+                if not is_plausible_iv(iv):
+                    continue
                 contracts.append(
                     OptionContract(
                         code=str(row.get("contractSymbol", "")),
                         option_type=option_type,
                         strike=strike,
                         expiration_date=expiration,
-                        implied_volatility=max(iv, 0.01),
+                        implied_volatility=iv,
                         delta=0.0,
                         # yfinance doesn't provide broker-calculated Greeks;
                         # leaving this at 0 makes GEXCalculator compute
@@ -462,7 +479,7 @@ class YFinanceMarketDataClient(MarketDataClient):
         available_dates = self._expiration_dates_sync(symbol)
         if not available_dates:
             raise RuntimeError(f"No option expirations available for {symbol}")
-        today = datetime.now(timezone.utc).date()
+        today = market_today()
         selected = min(
             available_dates,
             key=lambda expiry: abs(max((expiry - today).days, 0) - days_to_expiration),
@@ -477,7 +494,7 @@ class YFinanceMarketDataClient(MarketDataClient):
     def _fetch_expirations_sync(self, ticker: str) -> list[ExpirationInfo]:
         symbol = ticker.strip().upper()
         dates = self._expiration_dates_sync(symbol)
-        today = datetime.now(timezone.utc).date()
+        today = market_today()
         return [
             ExpirationInfo(
                 date=d,

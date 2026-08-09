@@ -2,7 +2,17 @@ import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, desc, select
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    desc,
+    inspect,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -315,12 +325,78 @@ class GEXSnapshotDBRecord(Base):
     days_to_expiration: Mapped[int] = mapped_column(Integer)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     underlying_price: Mapped[float] = mapped_column(Float)
-    zero_gamma_strike: Mapped[float] = mapped_column(Float)
-    call_wall_strike: Mapped[float] = mapped_column(Float)
-    put_wall_strike: Mapped[float] = mapped_column(Float)
+    # Nullable: a chain whose gamma profile never crosses zero has no
+    # zero-gamma level, and a chain with no strike on one side of spot has
+    # no wall on that side. See relax_gex_snapshot_level_columns() for how
+    # databases created before this change are brought forward.
+    zero_gamma_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_wall_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_wall_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
     net_gex: Mapped[float] = mapped_column(Float)
     iv_rank: Mapped[float] = mapped_column(Float)
     gex_status: Mapped[str] = mapped_column(String(16))
+
+
+_GEX_SNAPSHOT_LEVEL_COLUMNS = (
+    "zero_gamma_strike",
+    "call_wall_strike",
+    "put_wall_strike",
+)
+_GEX_SNAPSHOT_COLUMNS = (
+    "id",
+    "ticker",
+    "days_to_expiration",
+    "captured_at",
+    "underlying_price",
+    *_GEX_SNAPSHOT_LEVEL_COLUMNS,
+    "net_gex",
+    "iv_rank",
+    "gex_status",
+)
+
+
+def relax_gex_snapshot_level_columns(connection) -> None:
+    """Make the three GEX level columns nullable on a pre-existing table.
+
+    Base.metadata.create_all only creates tables that don't exist yet, so a
+    database created before the levels became nullable keeps its NOT NULL
+    constraints and would reject a snapshot of a chain with no gamma
+    crossing. Idempotent: does nothing once the columns already allow NULL.
+    """
+    inspector = inspect(connection)
+    table = GEXSnapshotDBRecord.__tablename__
+    if table not in inspector.get_table_names():
+        return
+    columns = {column["name"]: column for column in inspector.get_columns(table)}
+    stale = [
+        name
+        for name in _GEX_SNAPSHOT_LEVEL_COLUMNS
+        if name in columns and not columns[name]["nullable"]
+    ]
+    if not stale:
+        return
+
+    if connection.dialect.name == "sqlite":
+        # SQLite has no "ALTER COLUMN ... DROP NOT NULL"; the supported
+        # route is a table rebuild. Dropping the old table takes its indexes
+        # with it, so they're recreated afterwards under the same names
+        # SQLAlchemy's index=True would have used.
+        column_list = ", ".join(_GEX_SNAPSHOT_COLUMNS)
+        connection.exec_driver_sql(f"ALTER TABLE {table} RENAME TO {table}_legacy")
+        connection.exec_driver_sql(f"DROP INDEX IF EXISTS ix_{table}_ticker")
+        connection.exec_driver_sql(f"DROP INDEX IF EXISTS ix_{table}_captured_at")
+        GEXSnapshotDBRecord.__table__.create(connection)
+        connection.exec_driver_sql(
+            f"INSERT INTO {table} ({column_list}) "
+            f"SELECT {column_list} FROM {table}_legacy"
+        )
+        connection.exec_driver_sql(f"DROP TABLE {table}_legacy")
+        return
+
+    for name in stale:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ALTER COLUMN {name} DROP NOT NULL"
+        )
 
 
 class GEXSnapshotRepository:

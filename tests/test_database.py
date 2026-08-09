@@ -13,6 +13,7 @@ from app.database import (
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
+    relax_gex_snapshot_level_columns,
 )
 from app.models import (
     GEXStatus,
@@ -377,3 +378,69 @@ async def test_trade_review_repository_upsert_then_overwrite() -> None:
 async def test_trade_review_repository_get_review_returns_none_when_missing() -> None:
     repo = TradeReviewRepository(await _session_factory())
     assert await repo.get_review(str(uuid4())) is None
+
+
+LEGACY_GEX_SNAPSHOTS_DDL = """
+CREATE TABLE gex_snapshots (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    ticker VARCHAR(32) NOT NULL,
+    days_to_expiration INTEGER NOT NULL,
+    captured_at DATETIME NOT NULL,
+    underlying_price FLOAT NOT NULL,
+    zero_gamma_strike FLOAT NOT NULL,
+    call_wall_strike FLOAT NOT NULL,
+    put_wall_strike FLOAT NOT NULL,
+    net_gex FLOAT NOT NULL,
+    iv_rank FLOAT NOT NULL,
+    gex_status VARCHAR(16) NOT NULL
+)
+"""
+
+
+@pytest.mark.asyncio
+async def test_migration_relaxes_legacy_not_null_gex_level_columns() -> None:
+    """A database created before the GEX levels became nullable keeps its
+    NOT NULL constraints (create_all never alters an existing table), which
+    would reject a snapshot of a chain with no gamma crossing.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql(LEGACY_GEX_SNAPSHOTS_DDL)
+        await connection.exec_driver_sql(
+            "CREATE INDEX ix_gex_snapshots_ticker ON gex_snapshots (ticker)"
+        )
+        await connection.exec_driver_sql(
+            "INSERT INTO gex_snapshots VALUES "
+            "(1, 'AAPL', 30, '2026-08-01 00:00:00', 100.0, 95.0, 110.0, 90.0, "
+            "1000000.0, 40.0, 'POS_GAMMA')"
+        )
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repo = GEXSnapshotRepository(session_factory)
+
+    summary = gex_summary().model_copy(
+        update={"zero_gamma": None, "call_wall": None, "put_wall": None}
+    )
+    with pytest.raises(Exception):
+        await repo.save_snapshot("AAPL", 30, summary)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(relax_gex_snapshot_level_columns)
+        # Idempotent: a second run on an already-relaxed table is a no-op.
+        await connection.run_sync(relax_gex_snapshot_level_columns)
+
+    snapshot_id = await repo.save_snapshot("AAPL", 30, summary)
+    fetched = await repo.get_snapshot(snapshot_id)
+    assert fetched is not None
+    assert fetched.zero_gamma_strike is None
+    assert fetched.call_wall_strike is None
+    assert fetched.put_wall_strike is None
+
+    # The pre-existing row survived the rebuild intact.
+    preserved = await repo.get_snapshot(1)
+    assert preserved is not None
+    assert preserved.zero_gamma_strike == 95.0

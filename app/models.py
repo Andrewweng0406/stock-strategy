@@ -48,9 +48,16 @@ class PinningAnalysis(StrictModel):
 class OptionGEXSummary(StrictModel):
     ticker: str
     stock_price: float = Field(gt=0)
-    zero_gamma: float = Field(gt=0)
-    call_wall: float = Field(gt=0)
-    put_wall: float = Field(gt=0)
+    # Nullable on purpose. zero_gamma is None when the gamma profile never
+    # crosses zero inside the searched window (there is simply no such
+    # price); call_wall/put_wall are None when the chain has no qualifying
+    # strike on that side of spot. Returning an honest None beats
+    # fabricating a grid-boundary number that downstream code would treat
+    # as a real level — see app/analytics.py's _zero_gamma()/_walls().
+    # gex_status never depends on any of the three.
+    zero_gamma: float | None = Field(default=None, gt=0)
+    call_wall: float | None = Field(default=None, gt=0)
+    put_wall: float | None = Field(default=None, gt=0)
     iv_rank: float = Field(ge=0, le=100)
     net_gex: float
     gex_status: GEXStatus
@@ -258,9 +265,12 @@ class GEXSnapshot(StrictModel):
     days_to_expiration: int
     captured_at: datetime
     underlying_price: float
-    zero_gamma_strike: float
-    call_wall_strike: float
-    put_wall_strike: float
+    # Nullable for the same reason as OptionGEXSummary's levels above — a
+    # snapshot of a chain with no gamma crossing (or no strike on one side
+    # of spot) records that honestly instead of a made-up level.
+    zero_gamma_strike: float | None = None
+    call_wall_strike: float | None = None
+    put_wall_strike: float | None = None
     net_gex: float
     iv_rank: float
     gex_status: GEXStatus
