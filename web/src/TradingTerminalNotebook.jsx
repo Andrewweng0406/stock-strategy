@@ -9,6 +9,7 @@ import {
   Mic,
   Plus,
   PenTool,
+  RefreshCw,
   Send,
   Settings,
   ShieldAlert,
@@ -447,8 +448,8 @@ export default function TradingTerminalNotebook() {
           ? Math.min(...aggregateExpirations.map((e) => e.days_to_expiration))
           : null
         : selectedExpiration?.days_to_expiration ?? null;
-  // The chat payload's days_to_expiration is a required int backend-side, so
-  // it keeps its pre-existing 0 fallback.
+  // Backend calls that require an integer still use a fallback, but chat can
+  // send null so the copilot never silently treats "unknown right now" as 0DTE.
   const dte = resolvedDte ?? 0;
 
   // ---------- Health check ----------
@@ -568,7 +569,7 @@ export default function TradingTerminalNotebook() {
     else setTickerInput(ticker);
   }
 
-  function refreshConversations() {
+  function refreshConversations({ clearError = true } = {}) {
     return fetch(`${BASE_URL}/api/v1/conversations?user_id=${userId}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
@@ -576,17 +577,15 @@ export default function TradingTerminalNotebook() {
       })
       .then((data) => {
         setConversations(data.conversations || []);
-        setHistoryError(null);
+        if (clearError) setHistoryError(null);
       })
       // A failed list used to be indistinguishable from "no history yet".
       .catch((err) => setHistoryError(err.message || "無法載入歷史對話"));
   }
 
   // ---------- Phase 3: load persisted history, plans, and profile once ----------
-  useEffect(() => {
-    refreshConversations();
-
-    fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`)
+  function loadSignedPlans() {
+    return fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -601,8 +600,10 @@ export default function TradingTerminalNotebook() {
       })
       // Otherwise a failed load reads as "you have never signed a plan".
       .catch((err) => setJournalError(err.message || "無法載入已簽署計畫"));
+  }
 
-    fetch(`${BASE_URL}/api/v1/profile/${userId}`)
+  function loadProfile() {
+    return fetch(`${BASE_URL}/api/v1/profile/${userId}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -615,10 +616,17 @@ export default function TradingTerminalNotebook() {
           strategyTypesInput: (data.preferred_strategy_types || []).join(", "),
           notes: data.notes || "",
         });
+        setProfileError(null);
       })
       // A silent failure here shows an empty preferences form that looks
       // saved — the user would overwrite their real profile with blanks.
       .catch((err) => setProfileError(err.message || "無法載入交易偏好設定"));
+  }
+
+  useEffect(() => {
+    refreshConversations();
+    loadSignedPlans();
+    loadProfile();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -710,7 +718,7 @@ export default function TradingTerminalNotebook() {
             user_id: userId,
             conversation_id: conversationId,
             ticker: ticker,
-            days_to_expiration: dte,
+            days_to_expiration: resolvedDte,
             history: priorHistory,
           },
         }),
@@ -728,7 +736,7 @@ export default function TradingTerminalNotebook() {
         setTradePlan(data.trade_plan_card);
         setPlanBadge(true);
       }
-      refreshConversations();
+      refreshConversations({ clearError: false });
     } catch (err) {
       const detail = err.message || "未知錯誤";
       // Only a thrown fetch (TypeError) is an actual connectivity failure; a
@@ -1016,6 +1024,7 @@ export default function TradingTerminalNotebook() {
               activeConversationId={conversationId}
               error={historyError}
               onSelect={resumeConversation}
+              onRetry={() => refreshConversations()}
               onClose={() => setShowHistory(false)}
             />
           )}
@@ -1027,6 +1036,7 @@ export default function TradingTerminalNotebook() {
               saving={profileSaving}
               error={profileError}
               onSave={saveProfile}
+              onRetry={loadProfile}
               onClose={() => setShowProfile(false)}
             />
           )}
@@ -1244,8 +1254,18 @@ export default function TradingTerminalNotebook() {
                 已簽署計畫 · AI 建議紀錄
               </div>
               {journalError ? (
-                <div className="text-[10.5px] text-[#d8622b] px-0.5 py-1.5 leading-snug">
-                  ⚠ 無法載入已簽署計畫（{journalError}）— 這不代表沒有紀錄。
+                <div className="px-0.5 py-1.5">
+                  <div className="text-[10.5px] text-[#d8622b] leading-snug">
+                    ⚠ 無法載入已簽署計畫（{journalError}）— 這不代表沒有紀錄。
+                  </div>
+                  <button
+                    type="button"
+                    onClick={loadSignedPlans}
+                    className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-[#c9a15c] hover:text-[#d8b06c]"
+                  >
+                    <RefreshCw size={11} />
+                    重試
+                  </button>
                 </div>
               ) : journal.length === 0 ? (
                 <div className="text-[11px] text-[#57575c] px-0.5 py-1.5">尚無已簽署計畫 — 簽署上方計畫卡後會出現在這裡</div>
@@ -1309,7 +1329,7 @@ function BottomNavTab({ icon, label, active, badge, onClick }) {
   );
 }
 
-function HistoryPanel({ conversations, activeConversationId, error, onSelect, onClose }) {
+function HistoryPanel({ conversations, activeConversationId, error, onSelect, onRetry, onClose }) {
   return (
     <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(240,237,229,.09)]">
@@ -1319,7 +1339,19 @@ function HistoryPanel({ conversations, activeConversationId, error, onSelect, on
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-3 py-2.5 flex flex-col gap-1.5">
-        {error && <div className="text-[10.5px] text-[#d8622b] px-1 pb-1 leading-snug">⚠ {error}</div>}
+        {error && (
+          <div className="px-1 pb-1">
+            <div className="text-[10.5px] text-[#d8622b] leading-snug">⚠ {error}</div>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="mt-1 inline-flex items-center gap-1 text-[10px] text-[#c9a15c] hover:text-[#d8b06c]"
+            >
+              <RefreshCw size={11} />
+              重試
+            </button>
+          </div>
+        )}
         {conversations.length === 0 && (
           <div className="text-[11px] text-[#57575c] text-center mt-8">尚無歷史對話</div>
         )}
@@ -1347,7 +1379,7 @@ function HistoryPanel({ conversations, activeConversationId, error, onSelect, on
   );
 }
 
-function ProfilePanel({ draft, setDraft, saving, error, onSave, onClose }) {
+function ProfilePanel({ draft, setDraft, saving, error, onSave, onRetry, onClose }) {
   const options = [
     { value: "CONSERVATIVE", label: "保守" },
     { value: "BALANCED", label: "中性" },
@@ -1407,7 +1439,19 @@ function ProfilePanel({ draft, setDraft, saving, error, onSave, onClose }) {
         </div>
       </div>
       <div className="px-4 py-3 border-t border-[rgba(240,237,229,.09)]">
-        {error && <div className="text-[10.5px] text-[#d8622b] mb-2 leading-snug">⚠ {error}</div>}
+        {error && (
+          <div className="mb-2">
+            <div className="text-[10.5px] text-[#d8622b] leading-snug">⚠ {error}</div>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="mt-1 inline-flex items-center gap-1 text-[10px] text-[#c9a15c] hover:text-[#d8b06c]"
+            >
+              <RefreshCw size={11} />
+              重試
+            </button>
+          </div>
+        )}
         <button
           type="button"
           onClick={onSave}

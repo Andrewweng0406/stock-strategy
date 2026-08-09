@@ -270,11 +270,25 @@ async def get_gex_history(
 async def chat(
     request: Request, payload: ChatRequest, services: Services
 ) -> ChatResponse:
-    summary = await services.gex_service.get_summary(
-        payload.context.ticker, payload.context.days_to_expiration
+    effective_dte = (
+        payload.context.days_to_expiration
+        if payload.context.days_to_expiration is not None
+        else 30
     )
-    risk = parse_gex_risk_profile(
-        summary, payload.context.days_to_expiration
+    summary = await services.gex_service.get_summary(
+        payload.context.ticker, effective_dte
+    )
+    risk = parse_gex_risk_profile(summary, effective_dte)
+    llm_payload = (
+        payload
+        if payload.context.days_to_expiration is not None
+        else payload.model_copy(
+            update={
+                "context": payload.context.model_copy(
+                    update={"days_to_expiration": effective_dte}
+                )
+            }
+        )
     )
     profile = await services.profile_repository.get_profile(
         payload.context.user_id
@@ -290,7 +304,7 @@ async def chat(
         payload.context.conversation_id, payload.context.user_id
     )
     assistant_message, trade_plan = await services.llm.chat(
-        payload, summary, risk, profile, stored.messages
+        llm_payload, summary, risk, profile, stored.messages
     )
     await services.chat_repository.save_message(
         payload.context.conversation_id,

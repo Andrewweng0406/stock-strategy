@@ -116,7 +116,7 @@ class ChatContext(StrictModel):
     user_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
     ticker: str = Field(min_length=1, max_length=32)
-    days_to_expiration: int = Field(ge=0, le=730)
+    days_to_expiration: int | None = Field(default=None, ge=0, le=730)
     history: list[ChatMessage] = Field(default_factory=list, max_length=30)
 
 

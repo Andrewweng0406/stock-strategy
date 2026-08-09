@@ -144,3 +144,25 @@ def test_chat_history_is_scoped_to_the_requesting_user(monkeypatch) -> None:
         assert intruder.status_code == 200
 
     assert [item["content"] for item in responses.requests[-1]["input"]] == ["借過一下"]
+
+
+def test_chat_null_dte_uses_backend_fallback_in_model_context(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"CHATTEST{suffix}"
+    payload = _chat_payload(f"chat-user-{suffix}", f"chat-conv-{suffix}", ticker, "現在呢")
+    payload["context"]["days_to_expiration"] = None
+
+    responses = _FakeResponses()
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker, dte=30)
+        app.state.services.llm = LLMOrchestrator(
+            SimpleNamespace(responses=responses), "test-model", 250
+        )
+
+        response = client.post("/api/v1/chat", json=payload)
+        assert response.status_code == 200
+
+    instructions = responses.requests[0]["instructions"]
+    context_json = instructions.split("<context>", 1)[1].split("</context>", 1)[0]
+    context = json.loads(context_json)
+    assert context["days_to_expiration"] == 30
