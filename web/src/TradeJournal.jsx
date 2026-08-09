@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, Star, X } from "lucide-react";
+import { parseErrorDetail } from "./apiError.js";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
 const MONO =
@@ -17,13 +18,47 @@ const COMMON_STRATEGY_TYPES = [
   "Defined-Risk Iron Condor",
 ];
 
-async function parseErrorDetail(res) {
-  try {
-    const body = await res.json();
-    return body.detail ? JSON.stringify(body.detail) : `HTTP ${res.status}`;
-  } catch {
-    return `HTTP ${res.status}`;
-  }
+// One options contract controls 100 shares. The backend uses the same
+// multiplier when it derives pnl_pct (pnl / (entry_price * 100 * size) * 100),
+// so the close form's derived figures have to match it exactly.
+const CONTRACT_MULTIPLIER = 100;
+
+// How far a hand-entered PnL may drift from the derived one (slippage,
+// commissions, partial fills are all legitimate) before we flag it.
+const PNL_MISMATCH_TOLERANCE = 0.2;
+
+/** Finite and > 0, else null. For fields the backend declares `gt=0`. */
+function parsePositiveNumber(raw) {
+  const s = String(raw ?? "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Finite (negative allowed), else null. For PnL. */
+function parseFiniteNumber(raw) {
+  const s = String(raw ?? "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Strictly a positive integer, else null. No silent coercion to 1. */
+function parsePositiveInt(raw) {
+  const s = String(raw ?? "").trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return n > 0 ? n : null;
+}
+
+/** The PnL/PnL% implied by the exit price, on the backend's own formula. */
+function deriveClosePnl(entryPrice, positionSize, exitPrice) {
+  if (!Number.isFinite(entryPrice) || !Number.isFinite(positionSize)) return null;
+  if (!Number.isFinite(exitPrice)) return null;
+  const cost = entryPrice * CONTRACT_MULTIPLIER * positionSize;
+  if (cost === 0) return null;
+  const pnl = (exitPrice - entryPrice) * CONTRACT_MULTIPLIER * positionSize;
+  return { pnl, pct: (pnl / cost) * 100 };
 }
 
 function fmtDollar(n) {
@@ -47,7 +82,11 @@ function fmtDateTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  // Without the year, a trade from a previous year reads as if it were this
+  // year. Only spend the extra characters when it isn't the current year.
+  const isThisYear = d.getFullYear() === new Date().getFullYear();
   return d.toLocaleString("zh-TW", {
+    ...(isThisYear ? {} : { year: "numeric" }),
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
@@ -56,14 +95,17 @@ function fmtDateTime(iso) {
   });
 }
 
-export default function TradeJournalPanel({ userId, onClose }) {
+export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
+  const [plansError, setPlansError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [formError, setFormError] = useState(null);
+  const [closeError, setCloseError] = useState(null);
 
   const [draft, setDraft] = useState({
-    ticker: "",
+    ticker: (ticker || "").toUpperCase(),
     strategyType: "",
     entryPrice: "",
     positionSize: "1",
@@ -122,13 +164,17 @@ export default function TradeJournalPanel({ userId, onClose }) {
   }
 
   async function loadPlans() {
+    setPlansError(null);
     try {
       const res = await fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`);
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
       setPlans(data.plans || []);
-    } catch {
-      // Optional dropdown data — a failed fetch just leaves it empty.
+    } catch (err) {
+      // Linking a plan is what supplies stop_loss/target_price to the AI
+      // review's execution score — a silent failure here quietly degrades it
+      // while looking identical to "you have no saved plans".
+      setPlansError(err.message || "無法載入已儲存計畫");
     }
   }
 
@@ -138,8 +184,42 @@ export default function TradeJournalPanel({ userId, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
+  // Prefill from the terminal's current symbol, but leave it editable — a user
+  // may well want to log a trade on something other than what's on screen.
+  useEffect(() => {
+    if (!ticker) return;
+    setDraft((d) => ({ ...d, ticker: ticker.toUpperCase() }));
+  }, [ticker]);
+
+  // Backend clamps days_to_expiration to 0..730; fall back to 30 only when the
+  // terminal genuinely has no expiration selected.
+  const numericDte = Number(dte);
+  const snapshotDte = Number.isFinite(numericDte)
+    ? Math.min(730, Math.max(0, Math.round(numericDte)))
+    : 30;
+  // Recomputed each render so a panel left open overnight can't go stale.
+  const maxEntryDate = defaultLocalDateTimeInput();
+
   async function createTrade() {
-    if (!draft.ticker.trim() || !draft.strategyType.trim() || !draft.entryPrice) return;
+    const tickerValue = draft.ticker.trim().toUpperCase();
+    const strategyValue = draft.strategyType.trim();
+    const entryPrice = parsePositiveNumber(draft.entryPrice);
+    const positionSize = parsePositiveInt(draft.positionSize);
+
+    // These used to be a silent `return` — the button simply did nothing.
+    let validation = null;
+    if (!tickerValue) validation = "請輸入股票代號";
+    else if (!strategyValue) validation = "請輸入策略類型";
+    else if (entryPrice === null) validation = "進場價必須是大於 0 的數字";
+    else if (positionSize === null) validation = "口數必須是大於 0 的整數";
+    else if (draft.entryDate && new Date(draft.entryDate).getTime() > Date.now() + 60_000)
+      validation = "進場時間不能設定在未來";
+    if (validation) {
+      setFormError(validation);
+      return;
+    }
+
+    setFormError(null);
     setCreating(true);
     setError(null);
     try {
@@ -148,23 +228,25 @@ export default function TradeJournalPanel({ userId, onClose }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: userId,
-          ticker: draft.ticker.trim().toUpperCase(),
-          strategy_type: draft.strategyType.trim(),
-          entry_price: Number(draft.entryPrice),
-          position_size: Number(draft.positionSize) || 1,
+          ticker: tickerValue,
+          strategy_type: strategyValue,
+          entry_price: entryPrice,
+          position_size: positionSize,
           entry_date: draft.entryDate
             ? new Date(draft.entryDate).toISOString()
             : null,
           notes: draft.notes.trim() || null,
           source_plan_id: draft.sourcePlanId || null,
-          days_to_expiration: 30,
+          // The DTE actually on screen — the entry GEX snapshot the backend
+          // captures is only meaningful if it matches what was being looked at.
+          days_to_expiration: snapshotDte,
         }),
       });
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const trade = await res.json();
       setTrades((t) => [trade, ...t]);
       setDraft({
-        ticker: "",
+        ticker: (ticker || "").toUpperCase(),
         strategyType: "",
         entryPrice: "",
         positionSize: "1",
@@ -180,7 +262,18 @@ export default function TradeJournalPanel({ userId, onClose }) {
   }
 
   async function closeTrade(tradeId) {
-    if (!closeDraft.exitPrice || closeDraft.pnl === "") return;
+    const exitPrice = parsePositiveNumber(closeDraft.exitPrice);
+    const pnl = parseFiniteNumber(closeDraft.pnl);
+
+    let validation = null;
+    if (exitPrice === null) validation = "出場價必須是大於 0 的數字";
+    else if (pnl === null) validation = "損益必須是數字（可為負數）";
+    if (validation) {
+      setCloseError(validation);
+      return;
+    }
+
+    setCloseError(null);
     setClosing(true);
     setError(null);
     try {
@@ -190,9 +283,11 @@ export default function TradeJournalPanel({ userId, onClose }) {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            exit_price: Number(closeDraft.exitPrice),
+            exit_price: exitPrice,
             exit_date: new Date().toISOString(),
-            pnl: Number(closeDraft.pnl),
+            // Submitted as typed — real fills carry slippage and commissions
+            // the derived figure can't know about.
+            pnl,
           }),
         }
       );
@@ -228,6 +323,29 @@ export default function TradeJournalPanel({ userId, onClose }) {
 
   const openTrades = trades.filter((t) => t.status === "OPEN");
   const closedTrades = trades.filter((t) => t.status === "CLOSED");
+
+  // Disabled only for *visibly* incomplete forms. Filled-but-invalid input
+  // (e.g. "abc" in a price) stays clickable so the click can explain itself.
+  const createDisabled =
+    !draft.ticker.trim() ||
+    !draft.strategyType.trim() ||
+    !draft.entryPrice.trim() ||
+    !draft.positionSize.trim();
+  const closeDisabled = !closeDraft.exitPrice.trim() || !closeDraft.pnl.trim();
+
+  // Live math for the close form: the same formula the backend uses for
+  // pnl_pct, so the ×100 contract multiplier stops being invisible.
+  const closingTrade = openTrades.find((t) => t.id === closingId) || null;
+  const closeExitPrice = parsePositiveNumber(closeDraft.exitPrice);
+  const derivedClose = closingTrade
+    ? deriveClosePnl(closingTrade.entry_price, closingTrade.position_size, closeExitPrice)
+    : null;
+  const manualPnl = parseFiniteNumber(closeDraft.pnl);
+  const pnlMismatch =
+    derivedClose !== null &&
+    manualPnl !== null &&
+    Math.abs(manualPnl - derivedClose.pnl) >
+      Math.max(Math.abs(derivedClose.pnl) * PNL_MISMATCH_TOLERANCE, 1);
 
   return (
     <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
@@ -287,10 +405,23 @@ export default function TradeJournalPanel({ userId, onClose }) {
             <input
               type="datetime-local"
               value={draft.entryDate}
+              max={maxEntryDate}
               onChange={(e) => setDraft((d) => ({ ...d, entryDate: e.target.value }))}
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
           </div>
+          {plansError && (
+            <div className="text-[10px] text-[#d8622b] leading-snug">
+              ⚠ 無法載入已儲存計畫（{plansError}）— 未連結計畫時，AI 覆盤缺少停損/目標價，執行評分會較不準確。
+              <button
+                type="button"
+                onClick={loadPlans}
+                className="ml-1 underline hover:text-[#c9a15c]"
+              >
+                重試
+              </button>
+            </div>
+          )}
           {plans.length > 0 && (
             <select
               value={draft.sourcePlanId}
@@ -312,11 +443,18 @@ export default function TradeJournalPanel({ userId, onClose }) {
             rows={2}
             className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] resize-none ${MONO}`}
           />
+          {formError && (
+            <div className="text-[10.5px] text-[#d8622b] leading-snug">⚠ {formError}</div>
+          )}
+          <div className="text-[9px] text-[#57575c]">
+            將以目前終端機的 {draft.ticker || "—"} · {snapshotDte} DTE 擷取進場 GEX 快照
+          </div>
           <button
             type="button"
             onClick={createTrade}
-            disabled={creating}
-            className="flex items-center justify-center gap-1.5 py-2 rounded-md bg-[#c9a15c] text-[#1a1408] text-[11.5px] font-bold uppercase tracking-wide hover:bg-[#d8b06c] disabled:opacity-50 transition-colors"
+            disabled={creating || createDisabled}
+            title={createDisabled ? "請先填寫代號、策略類型、進場價與口數" : undefined}
+            className="flex items-center justify-center gap-1.5 py-2 rounded-md bg-[#c9a15c] text-[#1a1408] text-[11.5px] font-bold uppercase tracking-wide hover:bg-[#d8b06c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <Plus size={13} />
             {creating ? "建立中…" : "新增交易"}
@@ -331,7 +469,7 @@ export default function TradeJournalPanel({ userId, onClose }) {
             持倉中（{openTrades.length}）
           </div>
           <div className="flex flex-col gap-2">
-            {openTrades.length === 0 && (
+            {!loading && openTrades.length === 0 && (
               <div className="text-[11px] text-[#57575c]">尚無持倉中交易</div>
             )}
             {openTrades.map((t) => (
@@ -345,8 +483,14 @@ export default function TradeJournalPanel({ userId, onClose }) {
                   </span>
                   <span className="text-[9.5px] text-[#57575c]">{fmtDateTime(t.entry_date)}</span>
                 </div>
-                <div className="text-[10.5px] text-[#8d8d93] mb-2">
-                  進場 {fmtDollar(t.entry_price)} × {t.position_size}
+                <div
+                  className="text-[10.5px] text-[#8d8d93] mb-2"
+                  title={`每口 ${CONTRACT_MULTIPLIER} 股，成本 ${fmtDollar(
+                    t.entry_price * CONTRACT_MULTIPLIER * t.position_size
+                  )}`}
+                >
+                  進場 {fmtDollar(t.entry_price)}/股 × {t.position_size} 口 ×{" "}
+                  {CONTRACT_MULTIPLIER} = {fmtDollar(t.entry_price * CONTRACT_MULTIPLIER * t.position_size)}
                 </div>
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
@@ -368,12 +512,50 @@ export default function TradeJournalPanel({ userId, onClose }) {
                         className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
                       />
                     </div>
+
+                    {derivedClose && (
+                      <div className="rounded border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] px-2 py-1.5 leading-snug">
+                        <div className="text-[10.5px] text-[#8d8d93]">
+                          依出場價推算：
+                          <span
+                            className="font-bold ml-1"
+                            style={{ color: derivedClose.pnl >= 0 ? "#2fa37a" : "#d8622b" }}
+                          >
+                            {fmtDollar(derivedClose.pnl)}（{fmtPct(derivedClose.pct)}）
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCloseDraft((d) => ({ ...d, pnl: derivedClose.pnl.toFixed(2) }))
+                            }
+                            className="ml-1.5 text-[9.5px] text-[#c9a15c] underline hover:text-[#d8b06c]"
+                          >
+                            套用
+                          </button>
+                        </div>
+                        <div className="text-[9px] text-[#57575c] mt-0.5">
+                          ({fmtDollar(closeExitPrice)} − {fmtDollar(t.entry_price)}) × {CONTRACT_MULTIPLIER}{" "}
+                          股/口 × {t.position_size} 口
+                        </div>
+                      </div>
+                    )}
+                    {pnlMismatch && (
+                      <div className="text-[10px] text-[#c9a15c] leading-snug">
+                        ⚠ 手動輸入的損益與推算值相差超過 {Math.round(PNL_MISMATCH_TOLERANCE * 100)}%，
+                        請確認是否有滑價/手續費因素（仍可送出）。
+                      </div>
+                    )}
+                    {closeError && (
+                      <div className="text-[10px] text-[#d8622b] leading-snug">⚠ {closeError}</div>
+                    )}
+
                     <div className="flex gap-1.5">
                       <button
                         type="button"
                         onClick={() => closeTrade(t.id)}
-                        disabled={closing}
-                        className="flex-1 py-1.5 rounded bg-[#c9a15c] text-[#1a1408] text-[10.5px] font-bold disabled:opacity-50"
+                        disabled={closing || closeDisabled}
+                        title={closeDisabled ? "請先填寫出場價與損益" : undefined}
+                        className="flex-1 py-1.5 rounded bg-[#c9a15c] text-[#1a1408] text-[10.5px] font-bold disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {closing ? "平倉中…" : "確認平倉"}
                       </button>
@@ -392,6 +574,7 @@ export default function TradeJournalPanel({ userId, onClose }) {
                     onClick={() => {
                       setClosingId(t.id);
                       setCloseDraft({ exitPrice: "", pnl: "" });
+                      setCloseError(null);
                     }}
                     className="w-full py-1.5 rounded border border-[rgba(240,237,229,.16)] text-[#8d8d93] text-[10.5px] font-semibold hover:text-[#f0ede5] hover:border-[rgba(240,237,229,.28)] transition-colors"
                   >
@@ -409,7 +592,7 @@ export default function TradeJournalPanel({ userId, onClose }) {
             已平倉（{closedTrades.length}）
           </div>
           <div className="flex flex-col gap-2">
-            {closedTrades.length === 0 && (
+            {!loading && closedTrades.length === 0 && (
               <div className="text-[11px] text-[#57575c]">尚無已平倉交易</div>
             )}
             {closedTrades.map((t) => {

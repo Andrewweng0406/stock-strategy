@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import TradeJournalPanel from "./TradeJournal.jsx";
+import { parseErrorDetail } from "./apiError.js";
 
 /**
  * Trading Terminal Notebook
@@ -88,15 +89,6 @@ function fmtDateTime(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-}
-
-async function parseErrorDetail(res) {
-  try {
-    const body = await res.json();
-    return body.detail ? JSON.stringify(body.detail) : `HTTP ${res.status}`;
-  } catch {
-    return `HTTP ${res.status}`;
-  }
 }
 
 /**
@@ -378,6 +370,10 @@ export default function TradingTerminalNotebook() {
   const [health, setHealth] = useState({ state: "idle", mode: null, error: null });
 
   const [expirations, setExpirations] = useState([]);
+  // Which ticker the current `expirations` list actually belongs to. Without
+  // this the GEX effect can fire the moment `ticker` changes, using the
+  // PREVIOUS ticker's expiration dates / DTE.
+  const [expirationsTicker, setExpirationsTicker] = useState(null);
   const [expirationsLoading, setExpirationsLoading] = useState(false);
   const [expirationsError, setExpirationsError] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -402,6 +398,8 @@ export default function TradingTerminalNotebook() {
 
   // ---------- Phase 3: persistent memory ----------
   const [conversations, setConversations] = useState([]);
+  const [historyError, setHistoryError] = useState(null);
+  const [profileError, setProfileError] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   const [profile, setProfile] = useState({ risk_tolerance: null, preferred_strategy_types: [], notes: "" });
   const [profileDraft, setProfileDraft] = useState({ risk_tolerance: null, strategyTypesInput: "", notes: "" });
@@ -456,6 +454,16 @@ export default function TradingTerminalNotebook() {
   // ---------- Expirations fetch (ticker change drives the real, dynamic list) ----------
   useEffect(() => {
     let cancelled = false;
+    // A new ticker invalidates everything derived from the old one. Clearing
+    // up-front is what keeps the previous symbol's expirations (and the DTE
+    // derived from them, which also feeds the chat payload) from being used
+    // under the new symbol's header.
+    setExpirations([]);
+    setExpirationsTicker(null);
+    setSelectedDate(null);
+    setGexData(null);
+    setGexError(null);
+    setGexLoading(true);
     setExpirationsLoading(true);
     setExpirationsError(null);
     fetch(`${BASE_URL}/api/v1/expirations/${ticker}`)
@@ -467,18 +475,18 @@ export default function TradingTerminalNotebook() {
         if (cancelled) return;
         const list = (data.expirations || []).slice(0, MAX_EXPIRATIONS_SHOWN);
         setExpirations(list);
+        setExpirationsTicker(ticker);
         setExpirationsLoading(false);
-        setSelectedDate((prev) => {
-          if (list.some((e) => e.date === prev)) return prev;
-          const defaultPick =
-            list.find((e) => e.expiration_type !== "0DTE" && e.expiration_type !== "1DTE") || list[0];
-          return defaultPick ? defaultPick.date : null;
-        });
+        const defaultPick =
+          list.find((e) => e.expiration_type !== "0DTE" && e.expiration_type !== "1DTE") || list[0];
+        setSelectedDate(defaultPick ? defaultPick.date : null);
       })
       .catch((err) => {
         if (cancelled) return;
         setExpirationsError(err.message || "無法取得到期日");
         setExpirationsLoading(false);
+        // Nothing will fetch GEX now, so don't leave the panel spinning.
+        setGexLoading(false);
       });
     return () => {
       cancelled = true;
@@ -487,7 +495,13 @@ export default function TradingTerminalNotebook() {
 
   // ---------- GEX fetch (expiration / aggregate toggle drives header + left panel) ----------
   useEffect(() => {
-    if (aggregateMode ? expirations.length === 0 : !selectedDate) return;
+    // The expirations list in state may still be the previous ticker's — never
+    // build a GEX request out of it.
+    if (expirationsTicker !== ticker) return;
+    if (aggregateMode ? expirations.length === 0 : !selectedDate) {
+      setGexLoading(false);
+      return;
+    }
     let cancelled = false;
     setGexLoading(true);
     setGexError(null);
@@ -510,6 +524,9 @@ export default function TradingTerminalNotebook() {
       })
       .catch((err) => {
         if (cancelled) return;
+        // Keeping the previous payload on screen would render last-known
+        // numbers as if they were current — drop them and show the reason.
+        setGexData(null);
         setGexError(err.message || "無法連接後端");
         setGexLoading(false);
       });
@@ -517,7 +534,7 @@ export default function TradingTerminalNotebook() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker, selectedDate, aggregateMode, expirations]);
+  }, [ticker, selectedDate, aggregateMode, expirations, expirationsTicker]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -567,7 +584,7 @@ export default function TradingTerminalNotebook() {
   }, []);
 
   async function resumeConversation(conversationSummary) {
-    setShowHistory(false);
+    setHistoryError(null);
     try {
       const res = await fetch(
         `${BASE_URL}/api/v1/conversations/${conversationSummary.conversation_id}/messages?user_id=${userId}`
@@ -577,9 +594,11 @@ export default function TradingTerminalNotebook() {
       setMessages((data.messages || []).map((m) => ({ role: m.role, content: m.content })));
       setConversationId(conversationSummary.conversation_id);
       setTradePlan(null);
-    } catch {
-      // Resuming is a convenience feature — a failed fetch just leaves the
-      // current chat state untouched rather than surfacing a hard error.
+      setShowHistory(false);
+    } catch (err) {
+      // A failed resume used to look identical to a successful one that
+      // happened to load nothing — keep the panel open and say why.
+      setHistoryError(err.message || "無法載入這段對話");
     }
   }
 
@@ -592,6 +611,7 @@ export default function TradingTerminalNotebook() {
 
   async function saveProfile() {
     setProfileSaving(true);
+    setProfileError(null);
     try {
       const res = await fetch(`${BASE_URL}/api/v1/profile/${userId}`, {
         method: "PUT",
@@ -614,8 +634,10 @@ export default function TradingTerminalNotebook() {
         notes: saved.notes || "",
       });
       setShowProfile(false);
-    } catch {
-      // Best-effort — the draft stays open so the user can retry.
+    } catch (err) {
+      // The draft stays open so the user can retry — but they need to know
+      // the save didn't land, otherwise the panel silently closes on nothing.
+      setProfileError(err.message || "儲存偏好失敗");
     } finally {
       setProfileSaving(false);
     }
@@ -625,7 +647,13 @@ export default function TradingTerminalNotebook() {
   async function sendMessage(overrideText) {
     const text = (overrideText ?? input).trim();
     if (!text || chatLoading) return;
-    const priorHistory = messages.slice(-MAX_HISTORY).map((m) => ({ role: m.role, content: m.content }));
+    const restoreInput = overrideText === undefined ? input : null;
+    // `localOnly` bubbles are client-side error notices the model never
+    // actually said — sending them back as history would tell it that it did.
+    const priorHistory = messages
+      .filter((m) => !m.localOnly)
+      .slice(-MAX_HISTORY)
+      .map((m) => ({ role: m.role, content: m.content }));
     setMessages((m) => [...m, { role: "user", content: text }]);
     if (overrideText === undefined) setInput("");
     setChatLoading(true);
@@ -653,10 +681,21 @@ export default function TradingTerminalNotebook() {
       }
       refreshConversations();
     } catch (err) {
+      const detail = err.message || "未知錯誤";
+      // Only a thrown fetch (TypeError) is an actual connectivity failure; a
+      // 429 or other 4xx reached the backend just fine and deserves its own
+      // message rather than "can't reach the backend".
+      const isConnectivity = err instanceof TypeError;
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: `⚠️ 無法連接後端 (${BASE_URL})：${err.message || "未知錯誤"}` },
+        {
+          role: "assistant",
+          content: isConnectivity ? `⚠️ 無法連接後端 (${BASE_URL})：${detail}` : `⚠️ ${detail}`,
+          localOnly: true,
+        },
       ]);
+      // Don't make the user retype what they just sent.
+      if (restoreInput !== null) setInput(restoreInput);
     } finally {
       setChatLoading(false);
     }
@@ -712,17 +751,21 @@ export default function TradingTerminalNotebook() {
           <span className="text-[11px] text-[#8d8d93]">Equity Options</span>
         </div>
         <div className="flex items-baseline gap-2 shrink-0">
-          <span className="text-[22px] font-bold [font-variant-numeric:tabular-nums]">
-            {fmtDollar(gexData?.stock_price)}
-          </span>
+          {gexLoading ? (
+            <span className="text-[13px] font-semibold text-[#8d8d93] animate-pulse">載入中…</span>
+          ) : (
+            <span className="text-[22px] font-bold [font-variant-numeric:tabular-nums]">
+              {fmtDollar(gexData?.stock_price)}
+            </span>
+          )}
         </div>
         <div className="flex gap-2.5 ml-1.5 shrink-0">
-          <MetricChip label="Zero Γ" value={fmtDollar(gexData?.zero_gamma)} color="#c9a15c" />
-          <MetricChip label="Call Wall" value={fmtDollar(gexData?.call_wall)} color="#2fa37a" />
-          <MetricChip label="Put Wall" value={fmtDollar(gexData?.put_wall)} color="#d8622b" />
+          <MetricChip label="Zero Γ" value={fmtDollar(gexData?.zero_gamma)} color="#c9a15c" loading={gexLoading} />
+          <MetricChip label="Call Wall" value={fmtDollar(gexData?.call_wall)} color="#2fa37a" loading={gexLoading} />
+          <MetricChip label="Put Wall" value={fmtDollar(gexData?.put_wall)} color="#d8622b" loading={gexLoading} />
         </div>
         <div className="lg:ml-auto flex items-center gap-3 shrink-0">
-          {gexError && (
+          {gexError && !gexLoading && (
             <span className="text-[10px] text-[#d8622b]">GEX 請求失敗</span>
           )}
           <HealthBadge health={health} baseUrl={BASE_URL} />
@@ -779,57 +822,72 @@ export default function TradingTerminalNotebook() {
             {expirationsError && (
               <div className="text-[10.5px] text-[#d8622b] mb-3 leading-snug">⚠ {expirationsError}</div>
             )}
-            {gexError && (
-              <div className="text-[10.5px] text-[#d8622b] mb-3 leading-snug">⚠ {gexError}</div>
+
+            {gexLoading ? (
+              <GexPanelSkeleton ticker={ticker} />
+            ) : gexError || !gexData ? (
+              <div className="border border-[rgba(216,98,44,.35)] bg-[rgba(216,98,44,.08)] rounded px-3 py-3 text-[11px] leading-relaxed">
+                <div className="text-[#d8622b] font-bold mb-1">
+                  {gexError ? `${ticker} GEX 資料載入失敗` : `${ticker} 尚無 GEX 資料`}
+                </div>
+                <div className="text-[#8d8d93]">
+                  {gexError || "請選擇到期日，或稍後再試。"}
+                </div>
+                <div className="text-[9.5px] text-[#57575c] mt-1.5">
+                  為避免誤導，這裡不會保留上一次查詢的數字。
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <Stat label="Net GEX" value={fmtCompactUsd(gexData.net_gex)} tone={netGexTone} />
+                  <Stat label="IV Rank" value={`${gexData.iv_rank.toFixed(0)}%`} />
+                </div>
+
+                <PinningCard pinning={gexData.pinning} />
+
+                <Card>
+                  <CardTitle
+                    title="GEX by Strike"
+                    tag={
+                      aggregateMode
+                        ? `Aggregate · ${aggregateExpirations.length} 檔到期日`
+                        : selectedExpiration
+                          ? `${fmtExpirationDate(selectedExpiration.date)} exp · ${selectedExpiration.days_to_expiration} DTE`
+                          : "—"
+                    }
+                  />
+                  <GexChart
+                    putWall={gexData.put_wall}
+                    zeroGamma={gexData.zero_gamma}
+                    callWall={gexData.call_wall}
+                    gexStatus={gexData.gex_status}
+                  />
+                  <div className="text-[9px] text-[#57575c] mt-1.5 mb-1">
+                    示意分佈，依真實 Zero Γ / Call Wall / Put Wall 校正
+                  </div>
+                  <div className="flex gap-3.5 text-[10px] text-[#8d8d93] mt-1.5">
+                    <span className="flex items-center gap-1.5">
+                      <i className="w-2 h-2 rounded-sm inline-block bg-[#2fa37a]" />
+                      Positive (Call)
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <i className="w-2 h-2 rounded-sm inline-block bg-[#d8622b]" />
+                      Negative (Put)
+                    </span>
+                  </div>
+                </Card>
+
+                <Card>
+                  <CardTitle
+                    title="Net GEX Trend"
+                    tag="5D · Estimated"
+                    tagTitle="示意趨勢，非真實歷史資料 — 後端目前沒有 GEX 歷史時序端點"
+                  />
+                  <Sparkline values={DEMO_SPARK_VALUES} />
+                </Card>
+              </>
             )}
-
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <Stat label="Net GEX" value={gexData ? fmtCompactUsd(gexData.net_gex) : "—"} tone={netGexTone} />
-              <Stat label="IV Rank" value={gexData ? `${gexData.iv_rank.toFixed(0)}%` : "—"} />
-            </div>
-
-            <PinningCard pinning={gexData?.pinning} />
-
-            <Card>
-              <CardTitle
-                title="GEX by Strike"
-                tag={
-                  aggregateMode
-                    ? `Aggregate · ${aggregateExpirations.length} 檔到期日`
-                    : selectedExpiration
-                      ? `${fmtExpirationDate(selectedExpiration.date)} exp · ${selectedExpiration.days_to_expiration} DTE`
-                      : "—"
-                }
-              />
-              <GexChart
-                putWall={gexData?.put_wall}
-                zeroGamma={gexData?.zero_gamma}
-                callWall={gexData?.call_wall}
-                gexStatus={gexData?.gex_status}
-              />
-              <div className="text-[9px] text-[#57575c] mt-1.5 mb-1">
-                示意分佈，依真實 Zero Γ / Call Wall / Put Wall 校正
-              </div>
-              <div className="flex gap-3.5 text-[10px] text-[#8d8d93] mt-1.5">
-                <span className="flex items-center gap-1.5">
-                  <i className="w-2 h-2 rounded-sm inline-block bg-[#2fa37a]" />
-                  Positive (Call)
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <i className="w-2 h-2 rounded-sm inline-block bg-[#d8622b]" />
-                  Negative (Put)
-                </span>
-              </div>
-            </Card>
-
-            <Card>
-              <CardTitle
-                title="Net GEX Trend"
-                tag="5D · Estimated"
-                tagTitle="示意趨勢，非真實歷史資料 — 後端目前沒有 GEX 歷史時序端點"
-              />
-              <Sparkline values={DEMO_SPARK_VALUES} />
-            </Card>
           </div>
         </section>
 
@@ -905,6 +963,7 @@ export default function TradingTerminalNotebook() {
             <HistoryPanel
               conversations={conversations}
               activeConversationId={conversationId}
+              error={historyError}
               onSelect={resumeConversation}
               onClose={() => setShowHistory(false)}
             />
@@ -915,13 +974,19 @@ export default function TradingTerminalNotebook() {
               draft={profileDraft}
               setDraft={setProfileDraft}
               saving={profileSaving}
+              error={profileError}
               onSave={saveProfile}
               onClose={() => setShowProfile(false)}
             />
           )}
 
           {showJournal && (
-            <TradeJournalPanel userId={userId} onClose={() => setShowJournal(false)} />
+            <TradeJournalPanel
+              userId={userId}
+              ticker={ticker}
+              dte={dte}
+              onClose={() => setShowJournal(false)}
+            />
           )}
 
           <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-3.5">
@@ -978,10 +1043,12 @@ export default function TradingTerminalNotebook() {
             )}
           </div>
           <div className="flex items-center gap-2 px-3.5 py-3 border-t border-[rgba(240,237,229,.09)] bg-[#1b1b1e]">
-            <IconButton title="Voice input">
+            {/* Placeholders — nothing is wired behind them yet, so they're
+                marked inactive instead of looking like working controls. */}
+            <IconButton title="語音輸入（尚未支援）" disabled>
               <Mic size={16} />
             </IconButton>
-            <IconButton title="Sticker">
+            <IconButton title="貼圖（尚未支援）" disabled>
               <Smile size={16} />
             </IconButton>
             <input
@@ -1120,9 +1187,13 @@ export default function TradingTerminalNotebook() {
             </div>
 
             <div className="mt-4">
-              <div className="text-[10px] tracking-wider uppercase text-[#8d8d93] mb-2.5">Trade Journal Log</div>
+              {/* Signed AI *plans*, not executed trades — the trade journal
+                  overlay (BookOpen icon in the chat pane) is a different thing. */}
+              <div className="text-[10px] tracking-wider uppercase text-[#8d8d93] mb-2.5">
+                已簽署計畫 · AI 建議紀錄
+              </div>
               {journal.length === 0 ? (
-                <div className="text-[11px] text-[#57575c] px-0.5 py-1.5">尚無紀錄 — 簽署上方計畫卡後會出現在這裡</div>
+                <div className="text-[11px] text-[#57575c] px-0.5 py-1.5">尚無已簽署計畫 — 簽署上方計畫卡後會出現在這裡</div>
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {journal.map((e, i) => (
@@ -1183,7 +1254,7 @@ function BottomNavTab({ icon, label, active, badge, onClick }) {
   );
 }
 
-function HistoryPanel({ conversations, activeConversationId, onSelect, onClose }) {
+function HistoryPanel({ conversations, activeConversationId, error, onSelect, onClose }) {
   return (
     <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(240,237,229,.09)]">
@@ -1193,6 +1264,7 @@ function HistoryPanel({ conversations, activeConversationId, onSelect, onClose }
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-3 py-2.5 flex flex-col gap-1.5">
+        {error && <div className="text-[10.5px] text-[#d8622b] px-1 pb-1 leading-snug">⚠ {error}</div>}
         {conversations.length === 0 && (
           <div className="text-[11px] text-[#57575c] text-center mt-8">尚無歷史對話</div>
         )}
@@ -1220,7 +1292,7 @@ function HistoryPanel({ conversations, activeConversationId, onSelect, onClose }
   );
 }
 
-function ProfilePanel({ draft, setDraft, saving, onSave, onClose }) {
+function ProfilePanel({ draft, setDraft, saving, error, onSave, onClose }) {
   const options = [
     { value: "CONSERVATIVE", label: "保守" },
     { value: "BALANCED", label: "中性" },
@@ -1280,6 +1352,7 @@ function ProfilePanel({ draft, setDraft, saving, onSave, onClose }) {
         </div>
       </div>
       <div className="px-4 py-3 border-t border-[rgba(240,237,229,.09)]">
+        {error && <div className="text-[10.5px] text-[#d8622b] mb-2 leading-snug">⚠ {error}</div>}
         <button
           type="button"
           onClick={onSave}
@@ -1335,12 +1408,19 @@ function HealthBadge({ health, baseUrl }) {
   );
 }
 
-function MetricChip({ label, value, color }) {
+function MetricChip({ label, value, color, loading }) {
   return (
-    <div className="flex flex-col gap-0.5 px-3 py-1.5 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded-sm min-w-[88px]">
+    <div
+      className={`flex flex-col gap-0.5 px-3 py-1.5 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded-sm min-w-[88px] ${
+        loading ? "opacity-40 animate-pulse" : ""
+      }`}
+    >
       <span className="text-[9.5px] tracking-wider uppercase text-[#8d8d93]">{label}</span>
-      <span className="text-sm font-bold [font-variant-numeric:tabular-nums]" style={{ color }}>
-        {value}
+      <span
+        className="text-sm font-bold [font-variant-numeric:tabular-nums]"
+        style={{ color: loading ? "#57575c" : color }}
+      >
+        {loading ? "···" : value}
       </span>
     </div>
   );
@@ -1406,6 +1486,34 @@ function PinningCard({ pinning }) {
   );
 }
 
+/**
+ * Shown while a GEX request for the *current* ticker is in flight. The point
+ * is that nothing here is a number: a stale payload dimmed out would still
+ * read as data.
+ */
+function GexPanelSkeleton({ ticker }) {
+  return (
+    <div className="animate-pulse">
+      <div className="text-[10.5px] text-[#c9a15c] mb-3">載入 {ticker} GEX 資料中…</div>
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        {[0, 1].map((i) => (
+          <div key={i} className="bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded-sm px-2.5 py-2">
+            <div className="h-2 w-12 rounded bg-[rgba(240,237,229,.09)] mb-2" />
+            <div className="h-3.5 w-16 rounded bg-[rgba(240,237,229,.06)]" />
+          </div>
+        ))}
+      </div>
+      {[110, 190, 90].map((h, i) => (
+        <div
+          key={i}
+          className="bg-[#1b1b1e] border border-[rgba(240,237,229,.09)] rounded mb-3"
+          style={{ height: h }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function Card({ children }) {
   return <div className="bg-[#1b1b1e] border border-[rgba(240,237,229,.09)] rounded px-3.5 py-3.5 mb-3">{children}</div>;
 }
@@ -1424,12 +1532,18 @@ function CardTitle({ title, tag, tagTitle }) {
   );
 }
 
-function IconButton({ title, children }) {
+function IconButton({ title, disabled, children }) {
   return (
     <button
       type="button"
       title={title}
-      className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-md border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] text-[#8d8d93] hover:text-[#f0ede5] hover:border-[rgba(240,237,229,.16)] transition-colors"
+      disabled={disabled}
+      aria-disabled={disabled || undefined}
+      className={`w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-md border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] text-[#8d8d93] transition-colors ${
+        disabled
+          ? "opacity-30 cursor-not-allowed"
+          : "hover:text-[#f0ede5] hover:border-[rgba(240,237,229,.16)]"
+      }`}
     >
       {children}
     </button>
