@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -64,17 +65,26 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
 
 
 def test_list_trades_filters_by_ticker_and_status(monkeypatch) -> None:
+    # Tickers are suffixed with a fresh uuid per run because these endpoint
+    # tests hit the real on-disk dev database (see .env's DATABASE_URL),
+    # which is never dropped between test runs — a fixed literal ticker
+    # would accumulate rows across repeated local runs and make the
+    # exact-count assertion below flaky.
+    suffix = uuid4().hex[:8].upper()
+    ticker_a = f"TJTEST2{suffix}"
+    ticker_b = f"TJTEST3{suffix}"
+    user_id = f"user-2-{suffix}"
     with TestClient(app) as client:
-        _seed_cache(client, monkeypatch, "TJTEST2")
-        _seed_cache(client, monkeypatch, "TJTEST3")
-        _create_trade(client, "user-2", "TJTEST2")
-        _create_trade(client, "user-2", "TJTEST3")
+        _seed_cache(client, monkeypatch, ticker_a)
+        _seed_cache(client, monkeypatch, ticker_b)
+        _create_trade(client, user_id, ticker_a)
+        _create_trade(client, user_id, ticker_b)
 
-        response = client.get("/api/v1/trades?user_id=user-2&ticker=TJTEST2")
+        response = client.get(f"/api/v1/trades?user_id={user_id}&ticker={ticker_a}")
     assert response.status_code == 200
     trades = response.json()["trades"]
     assert len(trades) == 1
-    assert trades[0]["ticker"] == "TJTEST2"
+    assert trades[0]["ticker"] == ticker_a
 
 
 def test_close_trade_computes_pnl_pct(monkeypatch) -> None:
