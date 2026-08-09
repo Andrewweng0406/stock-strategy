@@ -1,9 +1,23 @@
-# Options Trading Copilot Backend
+# Options Trading Copilot
 
-FastAPI backend combining option Gamma Exposure analytics, Moomoo OpenD market
-data, OpenAI Responses API tool calling, Redis caching, and SQLite journaling.
+FastAPI backend combining option Gamma Exposure (GEX) analytics, an AI trading
+copilot (OpenAI Responses API tool calling), and a React frontend. Ships two
+market data modes so it can run fully local (real broker data) or in the
+cloud (no credentials required):
 
-## Run locally
+- **Local**: Moomoo OpenD, real-time quotes and option chains, requires a
+  logged-in OpenD instance and brokerage credentials.
+- **Cloud**: yfinance, no login required, ~15-20 min delayed data, no
+  broker-calculated Greeks (the backend computes gamma via Black-Scholes
+  itself in that case).
+- If neither is reachable, both fall back to deterministic mock data so the
+  API never hard-fails.
+
+An optional **CloudSync** mechanism lets a local instance (with real Moomoo
+data) push its computed GEX summaries to a cloud deployment's cache, without
+ever sending Moomoo credentials to the cloud — see `CLOUD_SYNC_URL` below.
+
+## Run the backend locally
 
 ```bash
 python3 -m venv .venv
@@ -15,19 +29,64 @@ python stockschedule.py
 
 Open `http://127.0.0.1:8000/docs` for the API documentation.
 
-The service falls back to deterministic mock market data when OpenD is disabled
-or unavailable. Redis is optional; an in-memory TTL cache is always maintained.
-Set `OPENAI_API_KEY` before calling `/api/v1/chat`.
+Redis is optional; an in-memory TTL cache is always maintained. Set
+`OPENAI_API_KEY` before calling `/api/v1/chat`. `DATABASE_URL` accepts either
+SQLite (`sqlite+aiosqlite:///...`, default, good for local dev) or Postgres
+(`postgresql+asyncpg://...`, used for the cloud deployment's persistent
+storage — chat history, trade journal, profile memory, GEX snapshots).
 
 `CORS_ORIGINS` is a comma-separated allowlist. It defaults to local frontend
-development servers on ports 3000 and 5173 for both `localhost` and `127.0.0.1`.
+development servers on ports 3000 and 5173 for both `localhost` and
+`127.0.0.1`.
+
+## Run the frontend locally
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Opens on `http://127.0.0.1:5173` and talks to the backend via
+`VITE_API_BASE_URL`, which defaults to `http://127.0.0.1:8002` — note this
+differs from `stockschedule.py`'s own default port (`8000`), so either run
+the backend with `--port 8002` or set `VITE_API_BASE_URL` to match.
+
+## Key environment variables
+
+See `.env.example` for the vars it lists, and `app/config.py` for the full
+set (everything has a sane default, so `.env.example` only lists the ones
+you're likely to actually change). Worth understanding:
+
+- `MOOMOO_ENABLED` — set `false` on any deployment that shouldn't (or can't)
+  hold brokerage credentials, e.g. the cloud instance. Falls back to
+  yfinance, then mock.
+- `CLOUD_SYNC_URL` / `SYNC_TOKEN` — set on the **local** instance only, to
+  push real GEX summaries to a cloud deployment's cache. Never set
+  `MOOMOO_*` credentials on the cloud instance itself.
+- `CHAT_RATE_LIMIT` — per-client-IP rate limit on `/api/v1/chat` (the only
+  endpoint that spends OpenAI budget per call), e.g. `10/minute`.
+- `SNAPSHOT_INTERVAL_SECONDS` — throttle for how often a real GEX calculation
+  gets persisted to the `gex_snapshots` history table per ticker.
 
 ## Main endpoints
 
-- `GET /health`
-- `GET /api/v1/gex/{ticker}?days_to_expiration=30`
-- `POST /api/v1/chat`
-- `POST /api/v1/plans/save`
+- `GET /health` — reports `market_data_mode` (`moomoo` / `yfinance` / `mock`)
+- `GET /api/v1/gex/{ticker}?days_to_expiration=30` — single-expiration GEX summary
+- `GET /api/v1/gex/{ticker}/aggregate?expirations=...` — aggregate GEX across up to 6 expirations
+- `GET /api/v1/gex/{ticker}/history?limit=100` — persisted GEX snapshot history
+- `GET /api/v1/expirations/{ticker}` — available option expirations
+- `POST /api/v1/chat` — AI copilot chat turn (GEX-grounded advice, trade plan cards)
+- `GET /api/v1/conversations` / `GET /api/v1/conversations/{id}/messages` — chat history
+- `GET /api/v1/plans` / `POST /api/v1/plans/save` — saved trade plans (trade journal)
+- `GET|PUT /api/v1/profile/{user_id}` — saved risk tolerance / preferences
+- `POST /api/v1/sync/gex`, `/sync/expirations`, `/sync/gex/aggregate` — CloudSync push targets (token-protected, local → cloud only)
 
 Moomoo tickers without a market prefix are treated as US symbols, so `AAPL`
 becomes `US.AAPL` for OpenD calls.
+
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
