@@ -88,7 +88,18 @@ function fmtDateTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  // Include the year for anything outside the current one, so a conversation
+  // or signed plan from last year can't read as if it were from today.
+  const isThisYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString("zh-TW", {
+    ...(isThisYear ? {} : { year: "numeric" }),
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 /**
@@ -391,6 +402,7 @@ export default function TradingTerminalNotebook() {
   const [signing, setSigning] = useState(false);
   const [signError, setSignError] = useState(null);
   const [journal, setJournal] = useState([]);
+  const [journalError, setJournalError] = useState(null);
 
   // Mobile-only: which of the three panels is showing (below the `lg` breakpoint).
   const [mobileTab, setMobileTab] = useState("chat");
@@ -423,11 +435,21 @@ export default function TradingTerminalNotebook() {
 
   const selectedExpiration = expirations.find((e) => e.date === selectedDate) || null;
   const aggregateExpirations = expirations.slice(0, MAX_AGGREGATE_EXPIRATIONS);
-  const dte = aggregateMode
-    ? aggregateExpirations.length
-      ? Math.min(...aggregateExpirations.map((e) => e.days_to_expiration))
-      : 0
-    : selectedExpiration?.days_to_expiration ?? 0;
+  // null means "no expiration is actually resolved for the CURRENT ticker"
+  // (mid-switch, or the expirations fetch failed). Consumers that would
+  // otherwise present a placeholder 0 as a real 0DTE — notably the trade
+  // journal's entry GEX snapshot — need to tell those two cases apart.
+  const resolvedDte =
+    expirationsTicker !== ticker
+      ? null
+      : aggregateMode
+        ? aggregateExpirations.length
+          ? Math.min(...aggregateExpirations.map((e) => e.days_to_expiration))
+          : null
+        : selectedExpiration?.days_to_expiration ?? null;
+  // The chat payload's days_to_expiration is a required int backend-side, so
+  // it keeps its pre-existing 0 fallback.
+  const dte = resolvedDte ?? 0;
 
   // ---------- Health check ----------
   async function checkHealth() {
@@ -547,10 +569,17 @@ export default function TradingTerminalNotebook() {
   }
 
   function refreshConversations() {
-    fetch(`${BASE_URL}/api/v1/conversations?user_id=${userId}`)
-      .then((res) => (res.ok ? res.json() : { conversations: [] }))
-      .then((data) => setConversations(data.conversations || []))
-      .catch(() => {});
+    return fetch(`${BASE_URL}/api/v1/conversations?user_id=${userId}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await parseErrorDetail(res));
+        return res.json();
+      })
+      .then((data) => {
+        setConversations(data.conversations || []);
+        setHistoryError(null);
+      })
+      // A failed list used to be indistinguishable from "no history yet".
+      .catch((err) => setHistoryError(err.message || "無法載入歷史對話"));
   }
 
   // ---------- Phase 3: load persisted history, plans, and profile once ----------
@@ -558,18 +587,26 @@ export default function TradingTerminalNotebook() {
     refreshConversations();
 
     fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`)
-      .then((res) => (res.ok ? res.json() : { plans: [] }))
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await parseErrorDetail(res));
+        return res.json();
+      })
       .then((data) => {
         const plans = (data.plans || []).map((p) => ({
           strategy: p.strategy_type,
           time: fmtDateTime(p.signed_at),
         }));
         if (plans.length) setJournal(plans);
+        setJournalError(null);
       })
-      .catch(() => {});
+      // Otherwise a failed load reads as "you have never signed a plan".
+      .catch((err) => setJournalError(err.message || "無法載入已簽署計畫"));
 
     fetch(`${BASE_URL}/api/v1/profile/${userId}`)
-      .then((res) => (res.ok ? res.json() : null))
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await parseErrorDetail(res));
+        return res.json();
+      })
       .then((data) => {
         if (!data) return;
         setProfile(data);
@@ -579,7 +616,9 @@ export default function TradingTerminalNotebook() {
           notes: data.notes || "",
         });
       })
-      .catch(() => {});
+      // A silent failure here shows an empty preferences form that looks
+      // saved — the user would overwrite their real profile with blanks.
+      .catch((err) => setProfileError(err.message || "無法載入交易偏好設定"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -654,7 +693,11 @@ export default function TradingTerminalNotebook() {
       .filter((m) => !m.localOnly)
       .slice(-MAX_HISTORY)
       .map((m) => ({ role: m.role, content: m.content }));
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    // Tagged so a failure can take the optimistic bubble back out again —
+    // otherwise a retry leaves the same user turn in the transcript twice,
+    // with no assistant reply between them.
+    const pendingId = crypto.randomUUID();
+    setMessages((m) => [...m, { role: "user", content: text, pendingId }]);
     if (overrideText === undefined) setInput("");
     setChatLoading(true);
     try {
@@ -674,7 +717,13 @@ export default function TradingTerminalNotebook() {
       });
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
-      setMessages((m) => [...m, { role: "assistant", content: data.assistant_message }]);
+      setMessages((m) => [
+        // The turn is committed now — drop the pending marker.
+        ...m.map((msg) =>
+          msg.pendingId === pendingId ? { role: msg.role, content: msg.content } : msg
+        ),
+        { role: "assistant", content: data.assistant_message },
+      ]);
       if (data.trade_plan_card) {
         setTradePlan(data.trade_plan_card);
         setPlanBadge(true);
@@ -687,7 +736,9 @@ export default function TradingTerminalNotebook() {
       // message rather than "can't reach the backend".
       const isConnectivity = err instanceof TypeError;
       setMessages((m) => [
-        ...m,
+        // Roll the optimistic user bubble back out; the text goes back into
+        // the input instead, so a retry sends exactly one copy of the turn.
+        ...m.filter((msg) => msg.pendingId !== pendingId),
         {
           role: "assistant",
           content: isConnectivity ? `⚠️ 無法連接後端 (${BASE_URL})：${detail}` : `⚠️ ${detail}`,
@@ -984,7 +1035,7 @@ export default function TradingTerminalNotebook() {
             <TradeJournalPanel
               userId={userId}
               ticker={ticker}
-              dte={dte}
+              dte={resolvedDte}
               onClose={() => setShowJournal(false)}
             />
           )}
@@ -1192,7 +1243,11 @@ export default function TradingTerminalNotebook() {
               <div className="text-[10px] tracking-wider uppercase text-[#8d8d93] mb-2.5">
                 已簽署計畫 · AI 建議紀錄
               </div>
-              {journal.length === 0 ? (
+              {journalError ? (
+                <div className="text-[10.5px] text-[#d8622b] px-0.5 py-1.5 leading-snug">
+                  ⚠ 無法載入已簽署計畫（{journalError}）— 這不代表沒有紀錄。
+                </div>
+              ) : journal.length === 0 ? (
                 <div className="text-[11px] text-[#57575c] px-0.5 py-1.5">尚無已簽署計畫 — 簽署上方計畫卡後會出現在這裡</div>
               ) : (
                 <div className="flex flex-col gap-1.5">

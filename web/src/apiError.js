@@ -13,10 +13,22 @@
 export async function parseErrorDetail(res) {
   if (res.status === 429) {
     const retryAfter = Number(res.headers?.get?.("Retry-After"));
-    if (Number.isFinite(retryAfter) && retryAfter > 0) {
-      return `請求過於頻繁，請等待 ${Math.ceil(retryAfter)} 秒後再試`;
+    const wait =
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? `請求過於頻繁，請等待 ${Math.ceil(retryAfter)} 秒後再試`
+        : "請求過於頻繁，請稍候再試";
+    // The body may carry a more specific reason (slowapi puts its limit
+    // description in `error`); prefer it, but keep the Chinese framing so a
+    // raw English limiter string never lands on its own.
+    let specific = null;
+    try {
+      const body = await res.json();
+      const detail = body?.detail ?? body?.error;
+      if (typeof detail === "string" && detail.trim()) specific = detail.trim();
+    } catch {
+      // no body / not JSON — the canned message stands on its own
     }
-    return "請求過於頻繁，請稍候再試";
+    return specific ? `${specific}（${wait}）` : wait;
   }
   try {
     const body = await res.json();

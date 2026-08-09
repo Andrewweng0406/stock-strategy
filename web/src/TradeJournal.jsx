@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Star, X } from "lucide-react";
 import { parseErrorDetail } from "./apiError.js";
 
@@ -51,14 +51,37 @@ function parsePositiveInt(raw) {
   return n > 0 ? n : null;
 }
 
-/** The PnL/PnL% implied by the exit price, on the backend's own formula. */
-function deriveClosePnl(entryPrice, positionSize, exitPrice) {
+/**
+ * Credit structures invert the debit convention: `entry_price` is premium
+ * COLLECTED and `exit_price` is what you pay to buy it back, so profit is
+ * (entry − exit), not (exit − entry). Getting this backwards turns a winning
+ * short put into a headline loss of the same magnitude.
+ *
+ * "Iron Condor" is included because the datalist's entry is the standard
+ * defined-risk (credit) construction. A debit "reverse iron condor" would be
+ * mis-inferred, which is why the applied convention is always labelled in the
+ * UI and the manual PnL field stays authoritative.
+ */
+const CREDIT_STRATEGY_RE = /credit|covered\s*call|cash[-\s]?secured|iron\s*condor/i;
+
+function isCreditStrategy(strategyType) {
+  return CREDIT_STRATEGY_RE.test(String(strategyType || ""));
+}
+
+/**
+ * The PnL/PnL% implied by the exit price, on the backend's own formula
+ * (pnl_pct = pnl / (entry_price * 100 * size) * 100). `isCredit` only flips
+ * the direction of the price difference — the cost basis stays the absolute
+ * premium, exactly as the backend computes it.
+ */
+function deriveClosePnl(entryPrice, positionSize, exitPrice, isCredit = false) {
   if (!Number.isFinite(entryPrice) || !Number.isFinite(positionSize)) return null;
   if (!Number.isFinite(exitPrice)) return null;
   const cost = entryPrice * CONTRACT_MULTIPLIER * positionSize;
   if (cost === 0) return null;
-  const pnl = (exitPrice - entryPrice) * CONTRACT_MULTIPLIER * positionSize;
-  return { pnl, pct: (pnl / cost) * 100 };
+  const diff = isCredit ? entryPrice - exitPrice : exitPrice - entryPrice;
+  const pnl = diff * CONTRACT_MULTIPLIER * positionSize;
+  return { pnl, pct: (pnl / cost) * 100, cost, isCredit };
 }
 
 function fmtDollar(n) {
@@ -186,19 +209,39 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
 
   // Prefill from the terminal's current symbol, but leave it editable — a user
   // may well want to log a trade on something other than what's on screen.
+  // Once they've typed in the field the panel stops touching it, otherwise a
+  // ticker change underneath the open overlay silently reverts their edit.
+  const tickerDirty = useRef(false);
   useEffect(() => {
-    if (!ticker) return;
+    if (!ticker || tickerDirty.current) return;
     setDraft((d) => ({ ...d, ticker: ticker.toUpperCase() }));
   }, [ticker]);
 
-  // Backend clamps days_to_expiration to 0..730; fall back to 30 only when the
-  // terminal genuinely has no expiration selected.
-  const numericDte = Number(dte);
-  const snapshotDte = Number.isFinite(numericDte)
+  // `dte` is null when the terminal has no expiration resolved for the current
+  // ticker (mid-switch, or the expirations fetch failed). Number(null) is 0,
+  // so the null case has to be caught before it reaches Number.isFinite —
+  // otherwise the 30 fallback is dead code and trades silently get a 0DTE
+  // entry snapshot presented as real entry context.
+  const numericDte = dte === null || dte === undefined || dte === "" ? NaN : Number(dte);
+  const dteResolved = Number.isFinite(numericDte);
+  // Backend clamps days_to_expiration to 0..730.
+  const snapshotDte = dteResolved
     ? Math.min(730, Math.max(0, Math.round(numericDte)))
     : 30;
   // Recomputed each render so a panel left open overnight can't go stale.
   const maxEntryDate = defaultLocalDateTimeInput();
+
+  // Editing any field clears a stale validation message — it used to sit there
+  // until the *next* failed submit, long after the user had fixed the field.
+  function updateDraft(patch) {
+    setDraft((d) => ({ ...d, ...patch }));
+    if (formError) setFormError(null);
+  }
+
+  function updateCloseDraft(patch) {
+    setCloseDraft((d) => ({ ...d, ...patch }));
+    if (closeError) setCloseError(null);
+  }
 
   async function createTrade() {
     const tickerValue = draft.ticker.trim().toUpperCase();
@@ -245,6 +288,8 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const trade = await res.json();
       setTrades((t) => [trade, ...t]);
+      // Fresh form — the prefill is welcome to take over the ticker again.
+      tickerDirty.current = false;
       setDraft({
         ticker: (ticker || "").toUpperCase(),
         strategyType: "",
@@ -332,20 +377,40 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
     !draft.entryPrice.trim() ||
     !draft.positionSize.trim();
   const closeDisabled = !closeDraft.exitPrice.trim() || !closeDraft.pnl.trim();
+  // The DTE always comes from the terminal, even when the symbol was typed by
+  // hand — the hint has to say so rather than implying both came from it.
+  const tickerOverridden =
+    !!draft.ticker.trim() &&
+    draft.ticker.trim().toUpperCase() !== (ticker || "").toUpperCase();
 
   // Live math for the close form: the same formula the backend uses for
   // pnl_pct, so the ×100 contract multiplier stops being invisible.
   const closingTrade = openTrades.find((t) => t.id === closingId) || null;
   const closeExitPrice = parsePositiveNumber(closeDraft.exitPrice);
+  // Direction comes from the *trade being closed*, not the create form's
+  // strategy field — that field belongs to a different (possibly empty,
+  // possibly unrelated) draft.
+  const closingIsCredit = closingTrade ? isCreditStrategy(closingTrade.strategy_type) : false;
   const derivedClose = closingTrade
-    ? deriveClosePnl(closingTrade.entry_price, closingTrade.position_size, closeExitPrice)
+    ? deriveClosePnl(
+        closingTrade.entry_price,
+        closingTrade.position_size,
+        closeExitPrice,
+        closingIsCredit
+      )
     : null;
   const manualPnl = parseFiniteNumber(closeDraft.pnl);
+  // Floor the tolerance on the position's cost basis rather than a flat $1,
+  // otherwise a near-breakeven trade flags on any realistic commission.
   const pnlMismatch =
     derivedClose !== null &&
     manualPnl !== null &&
     Math.abs(manualPnl - derivedClose.pnl) >
-      Math.max(Math.abs(derivedClose.pnl) * PNL_MISMATCH_TOLERANCE, 1);
+      Math.max(
+        Math.abs(derivedClose.pnl) * PNL_MISMATCH_TOLERANCE,
+        derivedClose.cost * 0.01,
+        5
+      );
 
   return (
     <div className="absolute inset-x-0 top-11 bottom-0 z-30 bg-[#121214] border-t border-[rgba(240,237,229,.09)] flex flex-col">
@@ -367,13 +432,16 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           <div className="flex gap-2">
             <input
               value={draft.ticker}
-              onChange={(e) => setDraft((d) => ({ ...d, ticker: e.target.value }))}
+              onChange={(e) => {
+                tickerDirty.current = true;
+                updateDraft({ ticker: e.target.value });
+              }}
               placeholder="代號"
               className={`w-20 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
             <input
               value={draft.strategyType}
-              onChange={(e) => setDraft((d) => ({ ...d, strategyType: e.target.value }))}
+              onChange={(e) => updateDraft({ strategyType: e.target.value })}
               placeholder="策略類型（可挑選或自行輸入）"
               list="trade-journal-strategy-types"
               className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -387,14 +455,14 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           <div className="flex gap-2">
             <input
               value={draft.entryPrice}
-              onChange={(e) => setDraft((d) => ({ ...d, entryPrice: e.target.value }))}
+              onChange={(e) => updateDraft({ entryPrice: e.target.value })}
               placeholder="進場價"
               inputMode="decimal"
               className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
             <input
               value={draft.positionSize}
-              onChange={(e) => setDraft((d) => ({ ...d, positionSize: e.target.value }))}
+              onChange={(e) => updateDraft({ positionSize: e.target.value })}
               placeholder="口數"
               inputMode="numeric"
               className={`w-16 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -406,7 +474,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
               type="datetime-local"
               value={draft.entryDate}
               max={maxEntryDate}
-              onChange={(e) => setDraft((d) => ({ ...d, entryDate: e.target.value }))}
+              onChange={(e) => updateDraft({ entryDate: e.target.value })}
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
           </div>
@@ -425,7 +493,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           {plans.length > 0 && (
             <select
               value={draft.sourcePlanId}
-              onChange={(e) => setDraft((d) => ({ ...d, sourcePlanId: e.target.value }))}
+              onChange={(e) => updateDraft({ sourcePlanId: e.target.value })}
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             >
               <option value="">（可選）連結已儲存的交易計畫</option>
@@ -438,7 +506,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           )}
           <textarea
             value={draft.notes}
-            onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
+            onChange={(e) => updateDraft({ notes: e.target.value })}
             placeholder="備註（選填）"
             rows={2}
             className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] resize-none ${MONO}`}
@@ -446,9 +514,23 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           {formError && (
             <div className="text-[10.5px] text-[#d8622b] leading-snug">⚠ {formError}</div>
           )}
-          <div className="text-[9px] text-[#57575c]">
-            將以目前終端機的 {draft.ticker || "—"} · {snapshotDte} DTE 擷取進場 GEX 快照
+          <div className="text-[9px] text-[#57575c] leading-snug">
+            {tickerOverridden ? (
+              <>
+                代號 {draft.ticker}（手動輸入）· DTE {snapshotDte} 取自終端機目前的{" "}
+                {(ticker || "—").toUpperCase()}
+              </>
+            ) : (
+              <>
+                將以目前終端機的 {draft.ticker || "—"} · {snapshotDte} DTE 擷取進場 GEX 快照
+              </>
+            )}
           </div>
+          {!dteResolved && (
+            <div className="text-[9.5px] text-[#c9a15c] leading-snug">
+              ⚠ 終端機目前尚未載入到期日，將以預設 {snapshotDte} DTE 擷取快照，進場 GEX 參考價值有限。
+            </div>
+          )}
           <button
             type="button"
             onClick={createTrade}
@@ -498,7 +580,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                       <input
                         value={closeDraft.exitPrice}
                         onChange={(e) =>
-                          setCloseDraft((d) => ({ ...d, exitPrice: e.target.value }))
+                          updateCloseDraft({ exitPrice: e.target.value })
                         }
                         placeholder="出場價"
                         inputMode="decimal"
@@ -506,7 +588,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                       />
                       <input
                         value={closeDraft.pnl}
-                        onChange={(e) => setCloseDraft((d) => ({ ...d, pnl: e.target.value }))}
+                        onChange={(e) => updateCloseDraft({ pnl: e.target.value })}
                         placeholder="損益（$）"
                         inputMode="decimal"
                         className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -526,7 +608,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                           <button
                             type="button"
                             onClick={() =>
-                              setCloseDraft((d) => ({ ...d, pnl: derivedClose.pnl.toFixed(2) }))
+                              updateCloseDraft({ pnl: derivedClose.pnl.toFixed(2) })
                             }
                             className="ml-1.5 text-[9.5px] text-[#c9a15c] underline hover:text-[#d8b06c]"
                           >
@@ -534,8 +616,21 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                           </button>
                         </div>
                         <div className="text-[9px] text-[#57575c] mt-0.5">
-                          ({fmtDollar(closeExitPrice)} − {fmtDollar(t.entry_price)}) × {CONTRACT_MULTIPLIER}{" "}
-                          股/口 × {t.position_size} 口
+                          {derivedClose.isCredit ? (
+                            <>
+                              ({fmtDollar(t.entry_price)} 收取 − {fmtDollar(closeExitPrice)} 買回) ×{" "}
+                              {CONTRACT_MULTIPLIER} 股/口 × {t.position_size} 口
+                            </>
+                          ) : (
+                            <>
+                              ({fmtDollar(closeExitPrice)} − {fmtDollar(t.entry_price)}) ×{" "}
+                              {CONTRACT_MULTIPLIER} 股/口 × {t.position_size} 口
+                            </>
+                          )}
+                        </div>
+                        <div className="text-[9px] text-[#57575c] mt-0.5">
+                          依「{derivedClose.isCredit ? "信用策略（收取權利金）" : "借記策略（買方）"}
+                          」方向計算；若方向判斷有誤，請直接以手動損益欄為準。
                         </div>
                       </div>
                     )}
