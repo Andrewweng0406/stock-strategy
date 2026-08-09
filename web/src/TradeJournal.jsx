@@ -37,6 +37,12 @@ function fmtPct(n) {
   return `${sign}${n.toFixed(2)}%`;
 }
 
+function defaultLocalDateTimeInput() {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  return now.toISOString().slice(0, 16);
+}
+
 function fmtDateTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -61,6 +67,7 @@ export default function TradeJournalPanel({ userId, onClose }) {
     strategyType: "",
     entryPrice: "",
     positionSize: "1",
+    entryDate: defaultLocalDateTimeInput(),
     notes: "",
     sourcePlanId: "",
   });
@@ -145,6 +152,9 @@ export default function TradeJournalPanel({ userId, onClose }) {
           strategy_type: draft.strategyType.trim(),
           entry_price: Number(draft.entryPrice),
           position_size: Number(draft.positionSize) || 1,
+          entry_date: draft.entryDate
+            ? new Date(draft.entryDate).toISOString()
+            : null,
           notes: draft.notes.trim() || null,
           source_plan_id: draft.sourcePlanId || null,
           days_to_expiration: 30,
@@ -158,6 +168,7 @@ export default function TradeJournalPanel({ userId, onClose }) {
         strategyType: "",
         entryPrice: "",
         positionSize: "1",
+        entryDate: defaultLocalDateTimeInput(),
         notes: "",
         sourcePlanId: "",
       });
@@ -269,6 +280,15 @@ export default function TradeJournalPanel({ userId, onClose }) {
               placeholder="口數"
               inputMode="numeric"
               className={`w-16 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[9.5px] text-[#57575c]">進場時間（預設現在，可自行調整）</span>
+            <input
+              type="datetime-local"
+              value={draft.entryDate}
+              onChange={(e) => setDraft((d) => ({ ...d, entryDate: e.target.value }))}
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
           </div>
           {plans.length > 0 && (

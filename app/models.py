@@ -220,6 +220,7 @@ class TradeCreate(StrictModel):
     ticker: str = Field(min_length=1, max_length=32)
     strategy_type: str = Field(min_length=1, max_length=128)
     source_plan_id: UUID | None = None
+    entry_date: datetime | None = None
     entry_price: float = Field(gt=0)
     position_size: int = Field(gt=0)
     notes: str | None = Field(default=None, max_length=2000)

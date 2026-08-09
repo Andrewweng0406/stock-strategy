@@ -442,7 +442,7 @@ class TradeRepository:
             source_plan_id=(
                 str(create.source_plan_id) if create.source_plan_id else None
             ),
-            entry_date=now,
+            entry_date=create.entry_date or now,
             exit_date=None,
             entry_price=create.entry_price,
             exit_price=None,

@@ -232,6 +232,36 @@ async def test_trade_repository_create_defaults_to_open() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trade_repository_create_defaults_entry_date_to_now() -> None:
+    repo = TradeRepository(await _session_factory())
+    before = datetime.now(timezone.utc)
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    after = datetime.now(timezone.utc)
+    assert before <= trade.entry_date <= after
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_create_honors_explicit_entry_date() -> None:
+    repo = TradeRepository(await _session_factory())
+    backdated = datetime(2026, 8, 1, 14, 30, tzinfo=timezone.utc)
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_date=backdated,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    assert trade.entry_date == backdated
+
+
+@pytest.mark.asyncio
 async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
     repo = TradeRepository(await _session_factory())
     await repo.create_trade(
