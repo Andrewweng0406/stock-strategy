@@ -1,14 +1,18 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from app.models import (
     ChatContext,
     ChatRequest,
+    GEXSnapshot,
     GEXStatus,
     OptionGEXSummary,
     RiskProfile,
+    Trade,
+    TradeStatus,
     UserProfile,
 )
 from app.services.openai_orchestrator import LLMOrchestrator
@@ -273,3 +277,120 @@ async def test_selected_put_forces_tool_and_builds_card() -> None:
     assert plan.max_loss_usd == 250
     assert plan.theta_warning is True
     assert len(reply) <= 200
+
+
+@pytest.mark.asyncio
+async def test_review_trade_forces_tool_and_returns_feedback() -> None:
+    class FakeResponses:
+        def __init__(self) -> None:
+            self.request: dict = {}
+
+        async def create(self, **kwargs):
+            self.request = kwargs
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="submit_trade_review",
+                        arguments=(
+                            '{"ai_feedback":"Exit respected the plan.",'
+                            '"key_takeaways":["Booked profit near target",'
+                            '"Stuck to the stop"]}'
+                        ),
+                        call_id="call-1",
+                    )
+                ],
+                output_text="",
+            )
+
+    fake_responses = FakeResponses()
+    fake_client = SimpleNamespace(responses=fake_responses)
+    orchestrator = LLMOrchestrator(fake_client, "test-model", 250)
+    trade = Trade(
+        id=uuid4(),
+        user_id="user-1",
+        ticker="AAPL",
+        strategy_type="Long Call",
+        source_plan_id=uuid4(),
+        entry_date=datetime.now(timezone.utc),
+        exit_date=datetime.now(timezone.utc),
+        entry_price=100.0,
+        exit_price=120.0,
+        position_size=1,
+        pnl=20.0,
+        pnl_pct=20.0,
+        status=TradeStatus.CLOSED,
+        notes="closed at target",
+        entry_gex_snapshot_id=1,
+    )
+    entry_snapshot = GEXSnapshot(
+        ticker="AAPL",
+        days_to_expiration=5,
+        captured_at=datetime.now(timezone.utc),
+        underlying_price=100.0,
+        zero_gamma_strike=95.0,
+        call_wall_strike=110.0,
+        put_wall_strike=90.0,
+        net_gex=1_000_000.0,
+        iv_rank=40.0,
+        gex_status=GEXStatus.POS_GAMMA,
+    )
+
+    ai_feedback, key_takeaways = await orchestrator.review_trade(
+        trade, entry_snapshot, 5
+    )
+
+    assert fake_responses.request["tool_choice"] == {
+        "type": "function",
+        "name": "submit_trade_review",
+    }
+    assert '"execution_score": 5' in fake_responses.request["instructions"]
+    assert ai_feedback == "Exit respected the plan."
+    assert key_takeaways == ["Booked profit near target", "Stuck to the stop"]
+
+
+@pytest.mark.asyncio
+async def test_review_trade_without_source_plan_marks_has_source_plan_false() -> None:
+    class FakeResponses:
+        async def create(self, **kwargs):
+            self.request = kwargs
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="submit_trade_review",
+                        arguments=(
+                            '{"ai_feedback":"No plan to compare against.",'
+                            '"key_takeaways":["Track a plan next time"]}'
+                        ),
+                        call_id="call-1",
+                    )
+                ],
+                output_text="",
+            )
+
+    fake_responses = FakeResponses()
+    fake_client = SimpleNamespace(responses=fake_responses)
+    orchestrator = LLMOrchestrator(fake_client, "test-model", 250)
+    trade = Trade(
+        id=uuid4(),
+        user_id="user-1",
+        ticker="AAPL",
+        strategy_type="Long Call",
+        source_plan_id=None,
+        entry_date=datetime.now(timezone.utc),
+        exit_date=datetime.now(timezone.utc),
+        entry_price=100.0,
+        exit_price=120.0,
+        position_size=1,
+        pnl=20.0,
+        pnl_pct=20.0,
+        status=TradeStatus.CLOSED,
+        notes=None,
+        entry_gex_snapshot_id=None,
+    )
+
+    await orchestrator.review_trade(trade, None, 4)
+
+    assert '"has_source_plan": false' in fake_responses.request["instructions"]
+    assert '"entry_gex_context": null' in fake_responses.request["instructions"]

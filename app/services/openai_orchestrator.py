@@ -10,10 +10,13 @@ from pydantic import ValidationError
 
 from app.models import (
     ChatRequest,
+    GEXSnapshot,
     OptionGEXSummary,
     PlanStatus,
     RiskProfile,
+    Trade,
     TradePlanToolArguments,
+    TradeReviewToolArguments,
     UserProfile,
     UserTradePlan,
 )
@@ -68,6 +71,22 @@ class LLMOrchestrator:
                 "Create one draft plan only after the user confirms, adopts a "
                 "recommendation, selects Option A/B/C or a risk profile, or directly "
                 "requests a card. Use the supplied calculated profile values."
+            ),
+            "strict": True,
+            "parameters": schema,
+        }
+
+    @staticmethod
+    def _review_tool() -> dict[str, Any]:
+        schema = TradeReviewToolArguments.model_json_schema()
+        schema["additionalProperties"] = False
+        return {
+            "type": "function",
+            "name": "submit_trade_review",
+            "description": (
+                "Submit the post-trade review prose. execution_score in the "
+                "context is already computed by the backend — explain it, "
+                "never invent a different one."
             ),
             "strict": True,
             "parameters": schema,
@@ -355,6 +374,64 @@ precise, probability-aware advice from the authoritative market context below.
 </behavior_rules>
 """.strip()
 
+    def _review_instructions(
+        self,
+        trade: Trade,
+        entry_snapshot: OptionGEXSummary | Any | None,
+        execution_score: int,
+    ) -> str:
+        context = json.dumps(
+            {
+                "ticker": trade.ticker,
+                "strategy_type": trade.strategy_type,
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "position_size": trade.position_size,
+                "pnl": trade.pnl,
+                "pnl_pct": trade.pnl_pct,
+                "notes": trade.notes,
+                "execution_score": execution_score,
+                "has_source_plan": trade.source_plan_id is not None,
+                "entry_gex_context": (
+                    {
+                        "zero_gamma": entry_snapshot.zero_gamma_strike,
+                        "call_wall": entry_snapshot.call_wall_strike,
+                        "put_wall": entry_snapshot.put_wall_strike,
+                        "gex_status": entry_snapshot.gex_status.value,
+                    }
+                    if entry_snapshot is not None
+                    else None
+                ),
+            },
+            ensure_ascii=True,
+        )
+        return f"""
+You are a disciplined senior options trading coach reviewing one already-closed
+trade. Give a direct, honest post-trade diagnosis.
+
+<context>
+{context}
+</context>
+
+<behavior_rules>
+1. execution_score in <context> is already computed by a fixed backend rule,
+   not by you. Never state a different score anywhere in your feedback.
+   Your job is to explain WHY it landed there, using entry_price,
+   exit_price, pnl_pct, and entry_gex_context.
+2. If has_source_plan is false, say plainly that there was no predefined
+   stop/target plan to grade discipline against, and that the score is a
+   pnl_pct-based approximation instead — never imply a plan comparison that
+   didn't happen.
+3. Ground every GEX reference only in entry_gex_context above (Zero Gamma /
+   Call Wall / Put Wall / gex_status at entry) — never invent levels not
+   present there, and never assert claims about market makers' intent or
+   any trader group.
+4. ai_feedback must be concise, direct, and at most 600 characters.
+5. key_takeaways must be 1 to 5 short, concrete, actionable bullets — no
+   vague platitudes like "manage risk better."
+</behavior_rules>
+""".strip()
+
     @classmethod
     def _compact_reply(cls, text: str) -> str:
         compact = "\n".join(line.strip() for line in text.splitlines() if line.strip())
@@ -586,3 +663,45 @@ precise, probability-aware advice from the authoritative market context below.
                 None,
             )
         return self._compact_reply(response.output_text), None
+
+    async def review_trade(
+        self,
+        trade: Trade,
+        entry_snapshot: Any | None,
+        execution_score: int,
+    ) -> tuple[str, list[str]]:
+        if self.client is None:
+            raise HTTPException(503, "OPENAI_API_KEY is not configured")
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                instructions=self._review_instructions(
+                    trade, entry_snapshot, execution_score
+                ),
+                input=[{"role": "user", "content": "Review this closed trade."}],
+                tools=[self._review_tool()],
+                tool_choice={"type": "function", "name": "submit_trade_review"},
+            )
+        except OpenAIError as exc:
+            logger.exception("Trade review OpenAI request failed")
+            raise HTTPException(
+                502, f"OpenAI request failed: {type(exc).__name__}"
+            ) from exc
+
+        for item in response.output:
+            if item.type != "function_call" or item.name != "submit_trade_review":
+                continue
+            try:
+                arguments = TradeReviewToolArguments.model_validate_json(
+                    item.arguments
+                )
+            except ValidationError as exc:
+                logger.warning("Invalid strict trade-review tool arguments: %s", exc)
+                raise HTTPException(
+                    502, "The model returned malformed review arguments"
+                ) from exc
+            return arguments.ai_feedback, arguments.key_takeaways
+
+        raise HTTPException(
+            502, "The model did not return the required trade-review tool call"
+        )
