@@ -182,3 +182,45 @@ def test_review_trade_upserts_review_with_fake_llm(monkeypatch) -> None:
 
         second = client.post(f"/api/v1/trades/{trade['id']}/review?user_id=user-8")
     assert second.status_code == 200
+
+
+def test_get_trade_review_returns_null_before_and_stored_review_after_post(
+    monkeypatch,
+) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTEST9")
+        trade = _create_trade(client, "user-9", "TJTEST9")
+        client.put(
+            f"/api/v1/trades/{trade['id']}?user_id=user-9",
+            json={
+                "exit_price": 120.0,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                "pnl": 20.0,
+            },
+        )
+
+        before = client.get(f"/api/v1/trades/{trade['id']}/review")
+        assert before.status_code == 200
+        assert before.json() is None
+
+        class FakeOrchestrator:
+            async def review_trade(self, trade, entry_snapshot, execution_score):
+                return (
+                    "Solid, disciplined exit.",
+                    ["Booked profit near plan", "Stayed within risk"],
+                )
+
+        app.state.services.llm = FakeOrchestrator()
+
+        posted = client.post(f"/api/v1/trades/{trade['id']}/review?user_id=user-9")
+        assert posted.status_code == 200
+        posted_body = posted.json()
+
+        after = client.get(f"/api/v1/trades/{trade['id']}/review")
+    assert after.status_code == 200
+    after_body = after.json()
+    assert after_body is not None
+    assert after_body["trade_id"] == trade["id"]
+    assert after_body["ai_feedback"] == posted_body["ai_feedback"]
+    assert after_body["execution_score"] == posted_body["execution_score"]
+    assert after_body["key_takeaways"] == posted_body["key_takeaways"]

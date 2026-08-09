@@ -495,3 +495,8 @@ async def review_trade(
     return await services.trade_review_repository.upsert_review(
         trade_id, execution_score, ai_feedback, key_takeaways
     )
+
+
+@app.get("/api/v1/trades/{trade_id}/review", response_model=TradeReview | None)
+async def get_trade_review(trade_id: str, services: Services) -> TradeReview | None:
+    return await services.trade_review_repository.get_review(trade_id)

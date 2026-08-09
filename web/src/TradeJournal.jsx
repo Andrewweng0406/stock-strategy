@@ -68,12 +68,36 @@ export default function TradeJournalPanel({ userId, onClose }) {
       const res = await fetch(`${BASE_URL}/api/v1/trades?user_id=${userId}`);
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
-      setTrades(data.trades || []);
+      const fetchedTrades = data.trades || [];
+      setTrades(fetchedTrades);
+      await loadReviewsFor(fetchedTrades.filter((t) => t.status === "CLOSED"));
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function loadReviewsFor(closedTrades) {
+    const entries = await Promise.all(
+      closedTrades.map(async (t) => {
+        try {
+          const res = await fetch(`${BASE_URL}/api/v1/trades/${t.id}/review`);
+          if (!res.ok) return null;
+          const review = await res.json();
+          return review ? [t.id, review] : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+    setReviews((prev) => {
+      const next = { ...prev };
+      for (const entry of entries) {
+        if (entry) next[entry[0]] = entry[1];
+      }
+      return next;
+    });
   }
 
   async function loadPlans() {
