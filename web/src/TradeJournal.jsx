@@ -5,6 +5,18 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
 const MONO =
   '[font-family:ui-monospace,"SF_Mono","JetBrains_Mono","IBM_Plex_Mono",Menlo,Consolas,monospace]';
 
+const COMMON_STRATEGY_TYPES = [
+  "Long Call",
+  "Long Put",
+  "Bull Call Debit Spread",
+  "Bear Put Debit Spread",
+  "Bull Put Credit Spread",
+  "Bear Call Credit Spread",
+  "Covered Call",
+  "Cash-Secured Put",
+  "Defined-Risk Iron Condor",
+];
+
 async function parseErrorDetail(res) {
   try {
     const body = await res.json();
@@ -233,9 +245,15 @@ export default function TradeJournalPanel({ userId, onClose }) {
             <input
               value={draft.strategyType}
               onChange={(e) => setDraft((d) => ({ ...d, strategyType: e.target.value }))}
-              placeholder="策略類型（例如 Long Call）"
+              placeholder="策略類型（可挑選或自行輸入）"
+              list="trade-journal-strategy-types"
               className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
+            <datalist id="trade-journal-strategy-types">
+              {COMMON_STRATEGY_TYPES.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
           </div>
           <div className="flex gap-2">
             <input
