@@ -30,6 +30,8 @@ from app.database import (
     GEXSnapshotRepository,
     PlanRepository,
     ProfileRepository,
+    TradeRepository,
+    TradeReviewRepository,
 )
 from app.market_data import (
     FallbackMarketDataClient,
@@ -52,11 +54,17 @@ from app.models import (
     SyncAggregateGexRequest,
     SyncExpirationsRequest,
     SyncGexRequest,
+    Trade,
+    TradeClose,
+    TradeCreate,
+    TradeList,
+    TradeReview,
+    TradeStatus,
     UserProfile,
     UserProfileUpdate,
     UserTradePlan,
 )
-from app.services import CloudSync, GEXService, LLMOrchestrator
+from app.services import CloudSync, GEXService, LLMOrchestrator, compute_execution_score
 
 
 _EXPIRATIONS_ADAPTER = TypeAdapter(list[ExpirationInfo])
@@ -78,6 +86,8 @@ class AppServices:
     chat_repository: ChatRepository
     profile_repository: ProfileRepository
     snapshot_repository: GEXSnapshotRepository
+    trade_repository: TradeRepository
+    trade_review_repository: TradeReviewRepository
     llm: LLMOrchestrator
 
 
@@ -127,6 +137,8 @@ async def lifespan(app: FastAPI):
         else None
     )
     snapshot_repository = GEXSnapshotRepository(session_factory)
+    trade_repository = TradeRepository(session_factory)
+    trade_review_repository = TradeReviewRepository(session_factory)
     gex_service = GEXService(
         market_data,
         cache,
@@ -146,6 +158,8 @@ async def lifespan(app: FastAPI):
         chat_repository=ChatRepository(session_factory),
         profile_repository=ProfileRepository(session_factory),
         snapshot_repository=snapshot_repository,
+        trade_repository=trade_repository,
+        trade_review_repository=trade_review_repository,
         llm=LLMOrchestrator(
             openai_client,
             settings.openai_model,
@@ -396,3 +410,88 @@ async def save_plan(
         return await services.plan_repository.save_signed_plan(payload.plan)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/trades", response_model=Trade)
+async def create_trade(payload: TradeCreate, services: Services) -> Trade:
+    summary = await services.gex_service.get_summary(
+        payload.ticker, payload.days_to_expiration
+    )
+    entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
+        payload.ticker.strip().upper(), payload.days_to_expiration, summary
+    )
+    return await services.trade_repository.create_trade(
+        payload, entry_gex_snapshot_id
+    )
+
+
+@app.get("/api/v1/trades", response_model=TradeList)
+async def list_trades(
+    user_id: str,
+    services: Services,
+    ticker: str | None = None,
+    status: str | None = None,
+) -> TradeList:
+    trades = await services.trade_repository.list_trades(user_id, ticker, status)
+    return TradeList(trades=trades)
+
+
+@app.put("/api/v1/trades/{trade_id}", response_model=Trade)
+async def close_trade(
+    trade_id: str, user_id: str, payload: TradeClose, services: Services
+) -> Trade:
+    try:
+        return await services.trade_repository.close_trade(
+            trade_id, user_id, payload
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/trades/{trade_id}/review", response_model=TradeReview)
+async def review_trade(
+    trade_id: str, user_id: str, services: Services
+) -> TradeReview:
+    trade = await services.trade_repository.get_trade(trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.user_id != user_id:
+        raise HTTPException(
+            status_code=403, detail="The trade belongs to a different user"
+        )
+    if trade.status != TradeStatus.CLOSED:
+        raise HTTPException(
+            status_code=400,
+            detail="Trade must be closed before it can be reviewed",
+        )
+    assert trade.exit_price is not None and trade.pnl_pct is not None
+
+    stop_loss = target_price = None
+    if trade.source_plan_id is not None:
+        plan = await services.plan_repository.get_plan(str(trade.source_plan_id))
+        if plan is not None:
+            stop_loss = plan.stop_loss
+            target_price = plan.target_price
+
+    execution_score = compute_execution_score(
+        entry_price=trade.entry_price,
+        exit_price=trade.exit_price,
+        pnl_pct=trade.pnl_pct,
+        stop_loss=stop_loss,
+        target_price=target_price,
+    )
+    entry_snapshot = (
+        await services.snapshot_repository.get_snapshot(trade.entry_gex_snapshot_id)
+        if trade.entry_gex_snapshot_id is not None
+        else None
+    )
+    ai_feedback, key_takeaways = await services.llm.review_trade(
+        trade, entry_snapshot, execution_score
+    )
+    return await services.trade_review_repository.upsert_review(
+        trade_id, execution_score, ai_feedback, key_takeaways
+    )
