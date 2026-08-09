@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
   Calendar,
   CheckCircle2,
   History,
@@ -16,6 +17,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
+import TradeJournalPanel from "./TradeJournal.jsx";
 
 /**
  * Trading Terminal Notebook
@@ -405,6 +407,7 @@ export default function TradingTerminalNotebook() {
   const [profileDraft, setProfileDraft] = useState({ risk_tolerance: null, strategyTypesInput: "", notes: "" });
   const [profileSaving, setProfileSaving] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showJournal, setShowJournal] = useState(false);
 
   const scrollRef = useRef(null);
   const isComposing = useRef(false);
@@ -855,6 +858,7 @@ export default function TradingTerminalNotebook() {
                     onClick={() => {
                       setShowHistory((v) => !v);
                       setShowProfile(false);
+                      setShowJournal(false);
                       refreshConversations();
                     }}
                     title="歷史對話"
@@ -869,6 +873,7 @@ export default function TradingTerminalNotebook() {
                     onClick={() => {
                       setShowProfile((v) => !v);
                       setShowHistory(false);
+                      setShowJournal(false);
                     }}
                     title="交易偏好設定"
                     className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
@@ -876,6 +881,20 @@ export default function TradingTerminalNotebook() {
                     }`}
                   >
                     <Settings size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowJournal((v) => !v);
+                      setShowHistory(false);
+                      setShowProfile(false);
+                    }}
+                    title="交易日誌"
+                    className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                      showJournal ? "text-[#c9a15c] bg-[rgba(201,161,92,.13)]" : "text-[#8d8d93] hover:text-[#f0ede5] hover:bg-[rgba(240,237,229,.08)]"
+                    }`}
+                  >
+                    <BookOpen size={13} />
                   </button>
                 </div>
               </div>
@@ -899,6 +918,10 @@ export default function TradingTerminalNotebook() {
               onSave={saveProfile}
               onClose={() => setShowProfile(false)}
             />
+          )}
+
+          {showJournal && (
+            <TradeJournalPanel userId={userId} onClose={() => setShowJournal(false)} />
           )}
 
           <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-3.5">
