@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -8,9 +9,21 @@ from app.database import (
     Base,
     ChatRepository,
     GEXSnapshotRepository,
+    PlanRepository,
     ProfileRepository,
+    TradeRepository,
+    TradeReviewRepository,
 )
-from app.models import GEXStatus, OptionGEXSummary, UserProfileUpdate
+from app.models import (
+    GEXStatus,
+    OptionGEXSummary,
+    PlanStatus,
+    TradeClose,
+    TradeCreate,
+    TradeStatus,
+    UserProfileUpdate,
+    UserTradePlan,
+)
 
 
 async def _session_factory() -> async_sessionmaker[AsyncSession]:
@@ -127,3 +140,189 @@ async def test_gex_snapshot_repository_list_respects_limit() -> None:
     snapshots = await repo.list_snapshots("AAPL", limit=1)
     assert len(snapshots) == 1
     assert snapshots[0].underlying_price == 102.0
+
+
+@pytest.mark.asyncio
+async def test_gex_snapshot_repository_save_snapshot_returns_id() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    snapshot_id = await repo.save_snapshot("AAPL", 30, gex_summary())
+    assert isinstance(snapshot_id, int)
+
+    fetched = await repo.get_snapshot(snapshot_id)
+    assert fetched is not None
+    assert fetched.ticker == "AAPL"
+    assert fetched.zero_gamma_strike == 95.0
+
+
+@pytest.mark.asyncio
+async def test_gex_snapshot_repository_get_snapshot_returns_none_when_missing() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    assert await repo.get_snapshot(999) is None
+
+
+@pytest.mark.asyncio
+async def test_plan_repository_get_plan_round_trips() -> None:
+    repo = PlanRepository(await _session_factory())
+    plan = UserTradePlan(
+        plan_id=uuid4(),
+        user_id="user-1",
+        conversation_id="conv-1",
+        ticker="AAPL",
+        strategy_type="Long Call",
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=120.0,
+        max_loss_usd=250.0,
+        theta_warning=False,
+    )
+    await repo.save_signed_plan(plan)
+
+    fetched = await repo.get_plan(str(plan.plan_id))
+    assert fetched is not None
+    assert fetched.ticker == "AAPL"
+    assert fetched.status == PlanStatus.SIGNED
+
+
+@pytest.mark.asyncio
+async def test_plan_repository_get_plan_returns_none_when_missing() -> None:
+    repo = PlanRepository(await _session_factory())
+    assert await repo.get_plan(str(uuid4())) is None
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_create_defaults_to_open() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1",
+            ticker="aapl",
+            strategy_type="Long Call",
+            entry_price=100.0,
+            position_size=1,
+            days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=42,
+    )
+    assert trade.ticker == "AAPL"
+    assert trade.status == TradeStatus.OPEN
+    assert trade.exit_price is None
+    assert trade.pnl_pct is None
+    assert trade.entry_gex_snapshot_id == 42
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
+    repo = TradeRepository(await _session_factory())
+    await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="TSLA", strategy_type="Long Put",
+            entry_price=200.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+
+    all_trades = await repo.list_trades("user-1")
+    assert len(all_trades) == 2
+
+    aapl_only = await repo.list_trades("user-1", ticker="AAPL")
+    assert [t.ticker for t in aapl_only] == ["AAPL"]
+
+    open_only = await repo.list_trades("user-1", status="OPEN")
+    assert len(open_only) == 2
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_close_trade_computes_pnl_pct() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    closed = await repo.close_trade(
+        str(trade.id),
+        "user-1",
+        TradeClose(
+            exit_price=120.0,
+            exit_date=datetime.now(timezone.utc),
+            pnl=20.0,
+        ),
+    )
+    assert closed.status == TradeStatus.CLOSED
+    assert closed.pnl_pct == 20.0
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_close_trade_raises_lookup_error_when_missing() -> None:
+    repo = TradeRepository(await _session_factory())
+    with pytest.raises(LookupError):
+        await repo.close_trade(
+            str(uuid4()),
+            "user-1",
+            TradeClose(exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=20.0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_close_trade_raises_permission_error_for_other_user() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    with pytest.raises(PermissionError):
+        await repo.close_trade(
+            str(trade.id),
+            "someone-else",
+            TradeClose(exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=20.0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_trade_repository_close_trade_raises_value_error_when_already_closed() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            entry_price=100.0, position_size=1, days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    close = TradeClose(exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=20.0)
+    await repo.close_trade(str(trade.id), "user-1", close)
+    with pytest.raises(ValueError):
+        await repo.close_trade(str(trade.id), "user-1", close)
+
+
+@pytest.mark.asyncio
+async def test_trade_review_repository_upsert_then_overwrite() -> None:
+    repo = TradeReviewRepository(await _session_factory())
+    trade_id = str(uuid4())
+    first = await repo.upsert_review(trade_id, 4, "Good exit.", ["Booked profit near plan"])
+    assert first.execution_score == 4
+
+    second = await repo.upsert_review(trade_id, 2, "Revised take.", ["Stop slipped"])
+    assert second.execution_score == 2
+
+    fetched = await repo.get_review(trade_id)
+    assert fetched is not None
+    assert fetched.ai_feedback == "Revised take."
+    assert fetched.key_takeaways == ["Stop slipped"]
+
+
+@pytest.mark.asyncio
+async def test_trade_review_repository_get_review_returns_none_when_missing() -> None:
+    repo = TradeReviewRepository(await _session_factory())
+    assert await repo.get_review(str(uuid4())) is None

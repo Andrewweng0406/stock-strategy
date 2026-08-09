@@ -189,6 +189,69 @@ class PlanList(StrictModel):
     plans: list[UserTradePlan]
 
 
+class TradeStatus(str, Enum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class Trade(StrictModel):
+    id: UUID
+    user_id: str = Field(min_length=1, max_length=128)
+    ticker: str = Field(min_length=1, max_length=32)
+    strategy_type: str = Field(min_length=1, max_length=128)
+    source_plan_id: UUID | None = None
+    entry_date: datetime
+    exit_date: datetime | None = None
+    entry_price: float = Field(gt=0)
+    exit_price: float | None = Field(default=None, gt=0)
+    position_size: int = Field(gt=0)
+    pnl: float | None = None
+    pnl_pct: float | None = None
+    status: TradeStatus
+    notes: str | None = Field(default=None, max_length=2000)
+    entry_gex_snapshot_id: int | None = None
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class TradeCreate(StrictModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    ticker: str = Field(min_length=1, max_length=32)
+    strategy_type: str = Field(min_length=1, max_length=128)
+    source_plan_id: UUID | None = None
+    entry_price: float = Field(gt=0)
+    position_size: int = Field(gt=0)
+    notes: str | None = Field(default=None, max_length=2000)
+    days_to_expiration: int = Field(default=30, ge=0, le=730)
+
+
+class TradeClose(StrictModel):
+    exit_price: float = Field(gt=0)
+    exit_date: datetime
+    pnl: float
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class TradeList(StrictModel):
+    trades: list[Trade]
+
+
+class TradeReview(StrictModel):
+    trade_id: UUID
+    execution_score: int = Field(ge=1, le=5)
+    ai_feedback: str
+    key_takeaways: list[str]
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class TradeReviewToolArguments(StrictModel):
+    ai_feedback: str = Field(min_length=1, max_length=600)
+    key_takeaways: list[str] = Field(min_length=1, max_length=5)
+
+
 class GEXSnapshot(StrictModel):
     ticker: str
     days_to_expiration: int
