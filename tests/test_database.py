@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -15,7 +15,7 @@ from app.database import (
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
-    ensure_trade_direction_columns,
+    ensure_trade_metadata_columns,
     relax_gex_snapshot_level_columns,
 )
 from app.models import (
@@ -277,6 +277,7 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
             strategy_type="Ratio Spread",
             direction=TradeDirection.NEUTRAL,
             credit_debit=TradeCreditDebit.CREDIT,
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0,
             position_size=1,
             days_to_expiration=30,
@@ -285,6 +286,7 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
     )
     assert trade.direction == TradeDirection.NEUTRAL
     assert trade.credit_debit == TradeCreditDebit.CREDIT
+    assert trade.expiration_date == date(2099, 8, 14)
 
 
 @pytest.mark.asyncio
@@ -460,19 +462,20 @@ def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() ->
             "NULL, NULL, '2026-08-01 00:00:00')"
         )
 
-        ensure_trade_direction_columns(connection)
-        ensure_trade_direction_columns(connection)
+        ensure_trade_metadata_columns(connection)
+        ensure_trade_metadata_columns(connection)
 
         columns = {column["name"]: column for column in inspect(connection).get_columns("trades")}
         assert columns["direction"]["nullable"] is False
         assert columns["credit_debit"]["nullable"] is False
+        assert columns["expiration_date"]["nullable"] is True
         rows = connection.exec_driver_sql(
-            "SELECT id, direction, credit_debit FROM trades ORDER BY id"
+            "SELECT id, direction, credit_debit, expiration_date FROM trades ORDER BY id"
         ).all()
 
     assert rows == [
-        ("trade-1", "SHORT", "CREDIT"),
-        ("trade-2", "NEUTRAL", "CREDIT"),
+        ("trade-1", "SHORT", "CREDIT", None),
+        ("trade-2", "NEUTRAL", "CREDIT", None),
     ]
 
 

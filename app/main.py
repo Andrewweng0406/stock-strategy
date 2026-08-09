@@ -32,7 +32,7 @@ from app.database import (
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
-    ensure_trade_direction_columns,
+    ensure_trade_metadata_columns,
     relax_gex_snapshot_level_columns,
 )
 from app.market_data import (
@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
         # before the GEX level columns became nullable need this one-shot
         # (idempotent) relaxation.
         await connection.run_sync(relax_gex_snapshot_level_columns)
-        await connection.run_sync(ensure_trade_direction_columns)
+        await connection.run_sync(ensure_trade_metadata_columns)
 
     calculator = GEXCalculator(settings.risk_free_rate)
     mock = MockMarketDataClient()

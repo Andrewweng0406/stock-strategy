@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class GEXStatus(str, Enum):
@@ -219,6 +219,7 @@ class Trade(StrictModel):
     strategy_type: str = Field(min_length=1, max_length=128)
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
+    expiration_date: date | None = None
     source_plan_id: UUID | None = None
     entry_date: datetime
     exit_date: datetime | None = None
@@ -241,12 +242,22 @@ class TradeCreate(StrictModel):
     strategy_type: str = Field(min_length=1, max_length=128)
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
+    expiration_date: date | None = None
     source_plan_id: UUID | None = None
     entry_date: datetime | None = None
     entry_price: float = Field(gt=0)
     position_size: int = Field(gt=0)
     notes: str | None = Field(default=None, max_length=2000)
     days_to_expiration: int = Field(default=30, ge=0, le=730)
+
+    @model_validator(mode="after")
+    def expiration_cannot_precede_entry(self) -> "TradeCreate":
+        if self.expiration_date is None:
+            return self
+        entry_date = self.entry_date or datetime.now(timezone.utc)
+        if self.expiration_date < entry_date.date():
+            raise ValueError("expiration_date cannot be before entry_date")
+        return self
 
 
 class TradeClose(StrictModel):

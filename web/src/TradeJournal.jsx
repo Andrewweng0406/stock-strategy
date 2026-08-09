@@ -148,7 +148,14 @@ function fmtDateTime(iso) {
   });
 }
 
-export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
+function fmtExpirationDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+export default function TradeJournalPanel({ userId, ticker, dte, expirationDate, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
   const [plansError, setPlansError] = useState(null);
@@ -280,6 +287,9 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
     const strategyValue = draft.strategyType.trim();
     const entryPrice = parsePositiveNumber(draft.entryPrice);
     const positionSize = parsePositiveInt(draft.positionSize);
+    const terminalTicker = (ticker || "").toUpperCase();
+    const tradeExpirationDate =
+      tickerValue && tickerValue === terminalTicker ? expirationDate : null;
 
     // These used to be a silent `return` — the button simply did nothing.
     let validation = null;
@@ -307,6 +317,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           strategy_type: strategyValue,
           direction: draft.direction,
           credit_debit: draft.creditDebit,
+          expiration_date: tradeExpirationDate,
           entry_price: entryPrice,
           position_size: positionSize,
           entry_date: draft.entryDate
@@ -423,6 +434,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
   const tickerOverridden =
     !!draft.ticker.trim() &&
     draft.ticker.trim().toUpperCase() !== (ticker || "").toUpperCase();
+  const effectiveExpirationDate = tickerOverridden ? null : expirationDate;
 
   // Live math for the close form: the same formula the backend uses for
   // pnl_pct, so the ×100 contract multiplier stops being invisible.
@@ -591,12 +603,12 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           <div className="text-[9px] text-[#57575c] leading-snug">
             {tickerOverridden ? (
               <>
-                代號 {draft.ticker}（手動輸入）· DTE {snapshotDte} 取自終端機目前的{" "}
+                代號 {draft.ticker}（手動輸入）· 未保存到期日 · DTE {snapshotDte} 取自終端機目前的{" "}
                 {(ticker || "—").toUpperCase()}
               </>
             ) : (
               <>
-                將以目前終端機的 {draft.ticker || "—"} · {snapshotDte} DTE 擷取進場 GEX 快照
+                將以目前終端機的 {draft.ticker || "—"} · 到期 {fmtExpirationDate(effectiveExpirationDate)} · {snapshotDte} DTE 擷取進場 GEX 快照
               </>
             )}
           </div>
@@ -649,7 +661,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                   {CONTRACT_MULTIPLIER} = {fmtDollar(t.entry_price * CONTRACT_MULTIPLIER * t.position_size)}
                 </div>
                 <div className="text-[9.5px] text-[#57575c] mb-2">
-                  方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                  到期 {fmtExpirationDate(t.expiration_date)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                 </div>
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
@@ -791,7 +803,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                     {fmtDollar(t.pnl)}
                   </div>
                   <div className="text-[9.5px] text-[#57575c] mb-2">
-                    方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                    到期 {fmtExpirationDate(t.expiration_date)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                   </div>
 
                   {review ? (

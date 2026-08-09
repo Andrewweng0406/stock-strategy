@@ -1,11 +1,12 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     Integer,
@@ -584,6 +585,7 @@ class TradeRecord(Base):
     credit_debit: Mapped[str] = mapped_column(
         String(16), default=TradeCreditDebit.DEBIT.value
     )
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     source_plan_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     entry_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     exit_date: Mapped[datetime | None] = mapped_column(
@@ -621,7 +623,7 @@ def infer_trade_credit_debit(strategy_type: str) -> TradeCreditDebit:
     return TradeCreditDebit.DEBIT
 
 
-def ensure_trade_direction_columns(connection) -> None:
+def ensure_trade_metadata_columns(connection) -> None:
     table = TradeRecord.__tablename__
     if table not in set(inspect(connection).get_table_names()):
         return
@@ -630,19 +632,29 @@ def ensure_trade_direction_columns(connection) -> None:
         column["name"]: column for column in inspect(connection).get_columns(table)
     }
     added_column = False
+    added_direction_or_credit = False
     if "direction" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN direction VARCHAR(16) "
             f"NOT NULL DEFAULT '{TradeDirection.LONG.value}'"
         )
         added_column = True
+        added_direction_or_credit = True
     if "credit_debit" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN credit_debit VARCHAR(16) "
             f"NOT NULL DEFAULT '{TradeCreditDebit.DEBIT.value}'"
         )
         added_column = True
+        added_direction_or_credit = True
+    if "expiration_date" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN expiration_date DATE"
+        )
+        added_column = True
     if not added_column:
+        return
+    if not added_direction_or_credit:
         return
 
     connection.exec_driver_sql(
@@ -695,6 +707,7 @@ class TradeRepository:
             strategy_type=create.strategy_type,
             direction=create.direction.value,
             credit_debit=create.credit_debit.value,
+            expiration_date=create.expiration_date,
             source_plan_id=(
                 str(create.source_plan_id) if create.source_plan_id else None
             ),
@@ -765,6 +778,7 @@ class TradeRepository:
             strategy_type=record.strategy_type,
             direction=TradeDirection(record.direction),
             credit_debit=TradeCreditDebit(record.credit_debit),
+            expiration_date=record.expiration_date,
             source_plan_id=record.source_plan_id,
             entry_date=_as_utc(record.entry_date),
             exit_date=_as_utc(record.exit_date),

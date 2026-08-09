@@ -525,6 +525,9 @@ precise, probability-aware advice from the authoritative market context below.
                 "strategy_type": trade.strategy_type,
                 "direction": trade.direction.value,
                 "credit_debit": trade.credit_debit.value,
+                "expiration_date": trade.expiration_date.isoformat()
+                if trade.expiration_date
+                else None,
                 "entry_price": trade.entry_price,
                 "exit_price": trade.exit_price,
                 "position_size": trade.position_size,

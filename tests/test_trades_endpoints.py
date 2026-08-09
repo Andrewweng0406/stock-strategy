@@ -47,6 +47,7 @@ def _create_trade(client: TestClient, user_id: str, ticker: str) -> dict:
             "strategy_type": "Long Call",
             "entry_price": 100.0,
             "position_size": 1,
+            "expiration_date": "2099-08-14",
             "days_to_expiration": 30,
         },
     )
@@ -64,6 +65,7 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
     assert trade["pnl_pct"] is None
     assert trade["direction"] == "LONG"
     assert trade["credit_debit"] == "DEBIT"
+    assert trade["expiration_date"] == "2099-08-14"
 
 
 def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -> None:
@@ -77,6 +79,7 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
                 "strategy_type": "Ratio Spread",
                 "direction": "NEUTRAL",
                 "credit_debit": "CREDIT",
+                "expiration_date": "2099-08-21",
                 "entry_price": 1.25,
                 "position_size": 2,
                 "days_to_expiration": 30,
@@ -86,6 +89,26 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
     trade = response.json()
     assert trade["direction"] == "NEUTRAL"
     assert trade["credit_debit"] == "CREDIT"
+    assert trade["expiration_date"] == "2099-08-21"
+
+
+def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTBADDATE")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-bad-date",
+                "ticker": "TJTESTBADDATE",
+                "strategy_type": "Long Call",
+                "entry_date": "2099-08-15T14:30:00Z",
+                "expiration_date": "2099-08-14",
+                "entry_price": 1.25,
+                "position_size": 2,
+                "days_to_expiration": 30,
+            },
+        )
+    assert response.status_code == 422
 
 
 def test_list_trades_filters_by_ticker_and_status(monkeypatch) -> None:
