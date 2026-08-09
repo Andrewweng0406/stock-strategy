@@ -1,4 +1,6 @@
 import json
+import logging
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -33,6 +35,9 @@ from app.models import (
     UserProfileUpdate,
     UserTradePlan,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -355,6 +360,73 @@ _GEX_SNAPSHOT_COLUMNS = (
 )
 
 
+_GEX_SNAPSHOT_BACKUP_PREFIX = f"{GEXSnapshotDBRecord.__tablename__}_backup_"
+
+
+def _row_count(connection, table: str) -> int:
+    return int(connection.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar())
+
+
+def _copy_rows(connection, source: str, target: str) -> None:
+    column_list = ", ".join(_GEX_SNAPSHOT_COLUMNS)
+    connection.exec_driver_sql(
+        f"INSERT INTO {target} ({column_list}) SELECT {column_list} FROM {source}"
+    )
+
+
+def _verify_copy(connection, source: str, target: str) -> None:
+    """Refuse to continue on a short copy.
+
+    Raising here leaves the backup table in place and the migration
+    unfinished, which the next run detects and resumes. Continuing would be
+    the one genuinely unrecoverable outcome.
+    """
+    expected = _row_count(connection, source)
+    actual = _row_count(connection, target)
+    if actual != expected:
+        raise RuntimeError(
+            f"Refusing to finish the {GEXSnapshotDBRecord.__tablename__} "
+            f"migration: copied {actual} of {expected} rows. The original "
+            f"data is intact in {source}; resolve before restarting."
+        )
+
+
+def _create_gex_snapshots_table(connection) -> None:
+    GEXSnapshotDBRecord.__table__.create(connection)
+
+
+def _resume_interrupted_migration(connection, table: str, backups: list[str]) -> None:
+    """Re-copy from the newest backup if the live table is missing rows.
+
+    Under pysqlite every DDL statement autocommits, escaping the enclosing
+    transaction — so a crash partway through the rebuild leaves the rename
+    and the CREATE committed while the INSERT...SELECT rolls back. That is
+    exactly how the live table can end up empty next to a full backup, and
+    it is why this runs before the nullability check below: by then the
+    columns already look correct, so a plain "is it stale?" test would
+    return early and call the data loss permanent.
+    """
+    backup = backups[-1]
+    backup_rows = _row_count(connection, backup)
+    live_exists = table in set(inspect(connection).get_table_names())
+    live_rows = _row_count(connection, table) if live_exists else 0
+    if live_exists and live_rows >= backup_rows:
+        return
+
+    logger.warning(
+        "Resuming an interrupted %s migration: %s has %d row(s), backup %s "
+        "has %d. Re-copying from the backup.",
+        table, table, live_rows, backup, backup_rows,
+    )
+    if not live_exists:
+        _create_gex_snapshots_table(connection)
+    else:
+        connection.exec_driver_sql(f"DELETE FROM {table}")
+    _copy_rows(connection, backup, table)
+    _verify_copy(connection, backup, table)
+    logger.warning("Recovered %d row(s) into %s from %s", backup_rows, table, backup)
+
+
 def relax_gex_snapshot_level_columns(connection) -> None:
     """Make the three GEX level columns nullable on a pre-existing table.
 
@@ -362,12 +434,29 @@ def relax_gex_snapshot_level_columns(connection) -> None:
     database created before the levels became nullable keeps its NOT NULL
     constraints and would reject a snapshot of a chain with no gamma
     crossing. Idempotent: does nothing once the columns already allow NULL.
+
+    The SQLite path rebuilds the table, and SQLite's autocommitting DDL
+    means that rebuild is NOT atomic no matter what transaction wraps it.
+    So it is built to be crash-safe by construction rather than by
+    transaction: the pre-migration table is renamed to a timestamped backup
+    and never dropped, the row count is verified before the migration is
+    considered finished, and an interrupted run is detected and resumed on
+    the next call. Cleaning up an old {table}_backup_* is a deliberate
+    human decision, not something this function will do for you.
     """
-    inspector = inspect(connection)
     table = GEXSnapshotDBRecord.__tablename__
-    if table not in inspector.get_table_names():
+    names = set(inspect(connection).get_table_names())
+
+    backups = sorted(name for name in names if name.startswith(_GEX_SNAPSHOT_BACKUP_PREFIX))
+    if backups:
+        _resume_interrupted_migration(connection, table, backups)
+        names = set(inspect(connection).get_table_names())
+
+    if table not in names:
         return
-    columns = {column["name"]: column for column in inspector.get_columns(table)}
+    columns = {
+        column["name"]: column for column in inspect(connection).get_columns(table)
+    }
     stale = [
         name
         for name in _GEX_SNAPSHOT_LEVEL_COLUMNS
@@ -379,20 +468,23 @@ def relax_gex_snapshot_level_columns(connection) -> None:
     if connection.dialect.name == "sqlite":
         # SQLite has no "ALTER COLUMN ... DROP NOT NULL"; the supported
         # route is a table rebuild. Dropping the old table takes its indexes
-        # with it, so they're recreated afterwards under the same names
-        # SQLAlchemy's index=True would have used.
-        column_list = ", ".join(_GEX_SNAPSHOT_COLUMNS)
-        connection.exec_driver_sql(f"ALTER TABLE {table} RENAME TO {table}_legacy")
+        # with it, so they're recreated with the new table under the same
+        # names SQLAlchemy's index=True would have used.
+        backup = f"{_GEX_SNAPSHOT_BACKUP_PREFIX}{int(time.time())}"
+        logger.warning(
+            "Rebuilding %s to relax NOT NULL on %s; the pre-migration table "
+            "is preserved as %s and is not dropped.",
+            table, ", ".join(stale), backup,
+        )
+        connection.exec_driver_sql(f"ALTER TABLE {table} RENAME TO {backup}")
         connection.exec_driver_sql(f"DROP INDEX IF EXISTS ix_{table}_ticker")
         connection.exec_driver_sql(f"DROP INDEX IF EXISTS ix_{table}_captured_at")
-        GEXSnapshotDBRecord.__table__.create(connection)
-        connection.exec_driver_sql(
-            f"INSERT INTO {table} ({column_list}) "
-            f"SELECT {column_list} FROM {table}_legacy"
-        )
-        connection.exec_driver_sql(f"DROP TABLE {table}_legacy")
+        _create_gex_snapshots_table(connection)
+        _copy_rows(connection, backup, table)
+        _verify_copy(connection, backup, table)
         return
 
+    # Postgres has real transactional DDL, so this one is genuinely atomic.
     for name in stale:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ALTER COLUMN {name} DROP NOT NULL"

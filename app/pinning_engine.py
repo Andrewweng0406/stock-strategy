@@ -145,6 +145,20 @@ def score_pinning(
     score = int(proximity_score + gamma_score + concentration_score + 0.5)
     label = _score_to_label(score)
 
+    # KNOWN LIMITATION (deliberate, pending design — do not "fix" locally).
+    # GEXCalculator now constrains call_wall to strikes >= spot and put_wall
+    # to strikes <= spot, so when the walls and `spot` come from the same
+    # instant (which is every production caller today) this condition can
+    # never be true and the BREAKOUT regime is unreachable. That is a real
+    # loss of capability, but the previous behaviour was not a working
+    # version of it: walls could land on the wrong side of spot, which made
+    # "broken" trivially and wrongly true. No false positives is the safer
+    # interim state. A genuine breakout signal needs a TEMPORAL comparison —
+    # current spot against a PRIOR snapshot's walls (gex_snapshots already
+    # stores them) — which is a feature design question queued for the
+    # human, not something to patch in here. score_pinning() already accepts
+    # walls independently of spot precisely so such a caller can exist.
+    #
     # A missing Wall is *absence of evidence*, not evidence of a breakout:
     # call_wall/put_wall are None when the chain simply has no qualifying
     # strike on that side of spot, which says nothing about whether a

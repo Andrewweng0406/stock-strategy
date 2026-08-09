@@ -478,30 +478,154 @@ def test_valuation_date_follows_us_eastern_not_utc(monkeypatch) -> None:
     )
 
 
-# --- Fix 3: one gamma basis shared by the headline and the curve ---
+# --- Fix 3 / C1: the curve is calibrated to the headline, not spliced ---
 
-def test_headline_net_gex_and_the_zero_gamma_curve_share_one_basis(frozen_now) -> None:
-    """With broker gamma supplied, the headline number and the zero-gamma
-    curve used to be computed from different gamma sources (market vs
-    Black-Scholes) and could disagree in sign. They are now the same
-    function: the curve's sample AT spot IS the headline number.
+SPOT = 100.0
+
+
+def zero_gamma_curve(
+    calc: GEXCalculator, contracts: list[OptionContract], spot: float = SPOT
+) -> tuple[list[float], list[float]]:
+    """Re-derive the exact grid _zero_gamma() searches, as (levels, values)."""
+    step = spot * analytics.ZERO_GAMMA_WINDOW_PCT / analytics.ZERO_GAMMA_HALF_STEPS
+    levels = [
+        spot + step * offset
+        for offset in range(
+            -analytics.ZERO_GAMMA_HALF_STEPS, analytics.ZERO_GAMMA_HALF_STEPS + 1
+        )
+    ]
+    calibration = calc._market_calibration(contracts, spot, FROZEN_NOW)
+    values = [
+        calibration * calc._net_at(contracts, level, FROZEN_NOW, at_current_spot=False)
+        for level in levels
+    ]
+    return levels, values
+
+
+def sign_changes(levels: list[float], values: list[float]) -> list[float]:
+    return [
+        levels[index]
+        for index, (left, right) in enumerate(zip(values, values[1:]))
+        if left == 0 or left * right < 0
+    ]
+
+
+def broker_gamma_chain(calc: GEXCalculator) -> list[OptionContract]:
+    """A chain whose true Black-Scholes gamma profile is strictly positive
+    across the whole search window — it has NO zero crossing at all — but
+    where the broker reports 12% more gamma than Black-Scholes on the ATM
+    put leg, enough to make net gamma at spot come out negative.
+
+    Splicing that single broker reading into an otherwise-BS curve puts a
+    step discontinuity at the midpoint sample and manufactures a pair of
+    adjacent crossings on either side of it, which is exactly the fabricated
+    zero_gamma that Fix 1 was written to eliminate.
     """
+    years = analytics.years_to_expiry(NEXT_MONTH, FROZEN_NOW)
+    atm_put_gamma = calc._bs_gamma(SPOT, 100.0, years, 0.30)
+    low_call_gamma = calc._bs_gamma(SPOT, 90.0, years, 0.30)
+    high_call_gamma = calc._bs_gamma(SPOT, 110.0, years, 0.30)
+    return [
+        chain_contract(
+            "PUT", 100.0, open_interest=5_000, market_gamma=atm_put_gamma * 1.12
+        ),
+        chain_contract("CALL", 90.0, open_interest=4_393, market_gamma=low_call_gamma),
+        chain_contract("CALL", 110.0, open_interest=4_393, market_gamma=high_call_gamma),
+    ]
+
+
+def test_broker_gamma_does_not_manufacture_a_crossing_in_a_profile_without_one(
+    frozen_now,
+) -> None:
+    calc = calculator()
+    contracts = broker_gamma_chain(calc)
+
+    # The underlying Black-Scholes profile never crosses zero in the window.
+    levels = zero_gamma_curve(calc, contracts)[0]
+    pure_bs = [
+        calc._net_at(contracts, level, FROZEN_NOW, at_current_spot=False)
+        for level in levels
+    ]
+    assert min(pure_bs) > 0
+    assert sign_changes(levels, pure_bs) == []
+
+    # ...so neither does the calibrated curve the search actually walks,
+    # and the honest answer is "there is no zero-gamma level".
+    _, values = zero_gamma_curve(calc, contracts)
+    assert sign_changes(levels, values) == []
+    assert calc.calculate("SPY", SPOT, contracts).zero_gamma is None
+
+
+def test_zero_gamma_curve_is_continuous_across_the_spot_sample(frozen_now) -> None:
+    """The failure mode this guards: one broker-gamma sample spliced into a
+    BS curve leaves a jump at the midpoint far larger than any neighbouring
+    step. Calibration is a constant multiplier, so every step stays the size
+    the smooth profile implies.
+    """
+    calc = calculator()
+    levels, values = zero_gamma_curve(calc, broker_gamma_chain(calc))
+    centre = analytics.ZERO_GAMMA_HALF_STEPS
+
+    steps = [abs(right - left) for left, right in zip(values, values[1:])]
+    step_at_spot = max(steps[centre - 1], steps[centre])
+    neighbouring = steps[centre - 6 : centre - 1] + steps[centre + 1 : centre + 6]
+    assert step_at_spot < 2 * max(neighbouring)
+    # Every step is small relative to the curve's own range: no cliff.
+    assert max(steps) < (max(values) - min(values)) / 10
+
+
+def test_calibration_anchors_the_curve_to_the_headline_without_moving_its_roots(
+    frozen_now,
+) -> None:
+    """Both halves of Fix 3's goal, stated independently of how the curve is
+    built: the curve's value at spot IS the headline net_gex, and the
+    crossings it reports are the ones the Black-Scholes profile actually
+    has — a constant multiplier cannot move a root.
+    """
+    calc = calculator()
     contracts = [
         chain_contract("CALL", 105.0, open_interest=4_000, market_gamma=0.02),
         chain_contract("PUT", 95.0, open_interest=6_000, market_gamma=0.05),
     ]
-    calc = calculator()
-    result = calc.calculate("SPY", 100.0, contracts)
+    result = calc.calculate("SPY", SPOT, contracts)
+    levels, values = zero_gamma_curve(calc, contracts)
+    centre = analytics.ZERO_GAMMA_HALF_STEPS
 
-    curve_at_spot = calc._net_at(contracts, 100.0, FROZEN_NOW, at_current_spot=True)
-    assert result.net_gex == pytest.approx(curve_at_spot, rel=1e-9)
-    assert result.gex_status == (
-        GEXStatus.POS_GAMMA if curve_at_spot > 0 else GEXStatus.NEG_GAMMA
-    )
-    # Broker gamma is only claimed to be valid at the current spot; away
-    # from it the curve is recomputed from Black-Scholes.
-    assert calc._gamma(contracts[0], 100.0, FROZEN_NOW, True) == 0.02
-    assert calc._gamma(contracts[0], 100.0, FROZEN_NOW, False) != 0.02
+    assert values[centre] == pytest.approx(result.net_gex, rel=1e-9)
+
+    pure_bs = [
+        calc._net_at(contracts, level, FROZEN_NOW, at_current_spot=False)
+        for level in levels
+    ]
+    assert sign_changes(levels, values) == sign_changes(levels, pure_bs)
+
+    # Broker gamma is still what the *headline* is built from at spot.
+    assert calc._gamma(contracts[0], SPOT, FROZEN_NOW, True) == 0.02
+    assert calc._gamma(contracts[0], SPOT, FROZEN_NOW, False) != 0.02
+
+
+def test_calibration_is_one_when_the_feed_supplies_no_broker_gamma(frozen_now) -> None:
+    calc = calculator()
+    contracts = [
+        chain_contract("CALL", 105.0, open_interest=4_000),
+        chain_contract("PUT", 95.0, open_interest=6_000),
+    ]
+    assert calc._market_calibration(contracts, SPOT, FROZEN_NOW) == 1.0
+
+
+def test_absurd_broker_gamma_falls_back_to_a_pure_black_scholes_curve(
+    frozen_now,
+) -> None:
+    """A calibration factor thousands of times off means the feed is broken.
+    Scaling the whole curve by it would launder bad data into a real-looking
+    level, so the curve reverts to plain Black-Scholes.
+    """
+    calc = calculator()
+    contracts = [
+        chain_contract("CALL", 105.0, open_interest=4_000, market_gamma=50.0),
+        chain_contract("PUT", 95.0, open_interest=6_000),
+    ]
+    assert calc._market_calibration(contracts, SPOT, FROZEN_NOW) == 1.0
 
 
 def test_zero_gamma_grid_resolution_does_not_depend_on_a_far_leaps_strike(

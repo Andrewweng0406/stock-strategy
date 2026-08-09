@@ -2,9 +2,11 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app import database
 from app.database import (
     Base,
     ChatRepository,
@@ -444,3 +446,138 @@ async def test_migration_relaxes_legacy_not_null_gex_level_columns() -> None:
     preserved = await repo.get_snapshot(1)
     assert preserved is not None
     assert preserved.zero_gamma_strike == 95.0
+
+
+# ---------- migration crash-safety (SQLite has autocommitting DDL) ----------
+
+def _legacy_sqlite_engine(path, rows: int = 252):
+    """A file-backed SQLite DB holding the pre-migration table, populated
+    the way a real deployment's would be. File-backed on purpose: the whole
+    hazard is that DDL autocommits to disk outside the transaction.
+    """
+    engine = create_engine(f"sqlite:///{path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(LEGACY_GEX_SNAPSHOTS_DDL)
+        connection.exec_driver_sql(
+            f"CREATE INDEX ix_gex_snapshots_ticker ON gex_snapshots (ticker)"
+        )
+        for index in range(rows):
+            connection.exec_driver_sql(
+                "INSERT INTO gex_snapshots VALUES "
+                f"({index + 1}, 'AAPL', 30, '2026-08-01 00:00:00', 100.0, 95.0, "
+                "110.0, 90.0, 1000000.0, 40.0, 'POS_GAMMA')"
+            )
+    return engine
+
+
+def _table_names(engine) -> set[str]:
+    with engine.connect() as connection:
+        return set(inspect(connection).get_table_names())
+
+
+def _count(engine, table: str) -> int:
+    with engine.connect() as connection:
+        return int(connection.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar())
+
+
+def test_migration_survives_a_crash_after_the_row_copy(tmp_path, monkeypatch) -> None:
+    """The reviewer's scenario: crash after INSERT...SELECT succeeded but
+    before the migration finished. Under pysqlite the RENAME/CREATE have
+    already autocommitted while the INSERT rolls back, so the naive version
+    of this left an EMPTY gex_snapshots table and no way back.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+
+    monkeypatch.setattr(
+        database, "_verify_copy",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated crash")),
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        with engine.begin() as connection:
+            database.relax_gex_snapshot_level_columns(connection)
+
+    # The pre-migration data still exists under a backup name; nothing dropped.
+    backups = [n for n in _table_names(engine) if n.startswith("gex_snapshots_backup_")]
+    assert len(backups) == 1
+    assert _count(engine, backups[0]) == 252
+
+    # Next startup resumes and completes, losing nothing.
+    monkeypatch.undo()
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+
+    assert _count(engine, "gex_snapshots") == 252
+    with engine.connect() as connection:
+        columns = {c["name"]: c for c in inspect(connection).get_columns("gex_snapshots")}
+    assert all(
+        columns[name]["nullable"] for name in database._GEX_SNAPSHOT_LEVEL_COLUMNS
+    )
+    assert [n for n in _table_names(engine) if n.startswith("gex_snapshots_backup_")]
+
+
+def test_migration_recovers_when_the_rebuilt_table_was_never_created(
+    tmp_path, monkeypatch
+) -> None:
+    """The worst interleaving: the RENAME autocommitted, then the process
+    died before the new table existed at all. `gex_snapshots` is simply gone.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+
+    monkeypatch.setattr(
+        database, "_create_gex_snapshots_table",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated crash")),
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        with engine.begin() as connection:
+            database.relax_gex_snapshot_level_columns(connection)
+    assert "gex_snapshots" not in _table_names(engine)
+
+    monkeypatch.undo()
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 252
+
+
+def test_migration_raises_loudly_on_a_short_copy_instead_of_continuing(
+    tmp_path, monkeypatch
+) -> None:
+    """A partial copy must never be accepted as a finished migration — that
+    is the step that would make the loss permanent and silent.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+
+    def _copy_only_half(connection, source, target):
+        connection.exec_driver_sql(
+            f"INSERT INTO {target} SELECT * FROM {source} WHERE id <= 100"
+        )
+
+    monkeypatch.setattr(database, "_copy_rows", _copy_only_half)
+    with pytest.raises(RuntimeError, match="copied 100 of 252 rows"):
+        with engine.begin() as connection:
+            database.relax_gex_snapshot_level_columns(connection)
+
+    monkeypatch.undo()
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 252
+
+
+def test_migration_leaves_a_completed_database_untouched(tmp_path) -> None:
+    """Idempotence, including "don't resurrect rows from an old backup".
+    A snapshot written after the migration must survive later startups.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+    for _ in range(2):
+        with engine.begin() as connection:
+            database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 252
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO gex_snapshots VALUES "
+            "(9999, 'MSFT', 30, '2026-08-02 00:00:00', 100.0, NULL, NULL, NULL, "
+            "-5.0, 40.0, 'NEG_GAMMA')"
+        )
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 253

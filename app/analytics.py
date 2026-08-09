@@ -61,6 +61,14 @@ MAX_PLAUSIBLE_IV = 5.0
 ZERO_GAMMA_WINDOW_PCT = 0.15
 ZERO_GAMMA_HALF_STEPS = 80
 
+# Sanity band for the broker-vs-Black-Scholes calibration factor (see
+# GEXCalculator._market_calibration). Broker gamma should be the same
+# quantity as BS gamma up to vol-surface/exercise/dividend differences; a
+# ratio three orders of magnitude away from 1 means the feed is wrong, and
+# scaling the whole curve by it would only launder bad data.
+MIN_CALIBRATION = 1e-3
+MAX_CALIBRATION = 1e3
+
 
 def market_now() -> datetime:
     """Current instant expressed in US market time (see MARKET_TIMEZONE)."""
@@ -149,12 +157,14 @@ def parse_gex_risk_profile(
 class GEXCalculator:
     """Calculate GEX using the conventional positive-call/negative-put sign.
 
-    One gamma rule is shared by every number this class produces (headline
-    net_gex, the zero-gamma curve, and the walls): broker/market gamma at
-    the current spot where the feed supplies it, recomputed Black-Scholes
-    gamma at every hypothetical spot level away from it. See _gamma(). The
-    two used to be computed on silently different bases and could disagree
-    in sign with each other.
+    One gamma rule is shared by every number this class produces. Quantities
+    evaluated AT the current spot (headline net_gex, the walls) use
+    broker/market gamma where the feed supplies it, since that is the only
+    price at which a broker's snapshot gamma is valid. The zero-gamma curve
+    spans hypothetical spot levels, so it is Black-Scholes throughout —
+    scaled by a single calibration constant that pins it to the headline
+    number at spot (see _market_calibration()). The headline and the curve
+    therefore agree at spot without the curve being discontinuous there.
     """
 
     def __init__(self, risk_free_rate: float) -> None:
@@ -183,14 +193,18 @@ class GEXCalculator:
     ) -> float:
         """Per-contract gamma at price `level`.
 
-        One rule, applied identically by every caller (see the class
-        docstring): broker/market gamma is a snapshot quantity that is only
-        valid at the *current* spot, so it is used exactly when the price
-        being evaluated IS the current spot, and Black-Scholes gamma is
-        recomputed for every hypothetical price level away from it. That
-        keeps the headline net_gex and the zero-gamma curve on one basis —
-        the curve literally passes through the headline value at spot,
-        because that grid point is computed by this same call.
+        Broker/market gamma is a snapshot quantity that is only valid at the
+        *current* spot (it embeds the broker's own vol surface, American
+        exercise and dividend treatment), so it is used exactly when the
+        price being evaluated IS the current spot; Black-Scholes gamma is
+        recomputed for every hypothetical price level away from it.
+
+        Callers that need a whole curve must NOT mix the two by flipping
+        this flag on for a single sample — broker and BS gamma are simply
+        different numbers, so that injects a step discontinuity at the one
+        point that matters and can manufacture a pair of fake zero
+        crossings around spot. _zero_gamma() reconciles the two bases with
+        a smooth scalar calibration instead; see _market_calibration().
         """
         if at_current_spot and contract.market_gamma > 0:
             return contract.market_gamma
@@ -230,6 +244,48 @@ class GEXCalculator:
             self._contract_gex(c, level, now, at_current_spot) for c in contracts
         )
 
+    def _market_calibration(
+        self, contracts: list[OptionContract], spot: float, now: datetime
+    ) -> float:
+        """Scalar `k` that maps the Black-Scholes curve onto the broker's
+        gamma reading at the current spot.
+
+        `k = market_net_at_spot / bs_net_at_spot`, both evaluated at the
+        current spot over the same contracts. Multiplying the whole BS
+        curve by it makes the curve pass through the headline net_gex by
+        construction (`k * bs_net_at_spot == market_net_at_spot`) while
+        staying continuous everywhere — which a single injected broker-gamma
+        sample does not.
+
+        Because `k` is a constant, it cannot move where the curve crosses
+        zero: the crossings stay exactly where the Black-Scholes shape puts
+        them. That is the point. It reconciles the magnitude/sign of the two
+        bases without letting the broker's single-point reading invent
+        roots the underlying profile doesn't have.
+
+        Returns 1.0 (i.e. plain BS) when there is no broker gamma to
+        calibrate against, when the BS net at spot is zero, or when the
+        implied ratio is degenerate/absurd — a factor that far from 1 means
+        the feed is wrong, not that the curve needs rescaling by it.
+        """
+        bs_net = self._net_at(contracts, spot, now, at_current_spot=False)
+        if bs_net == 0.0:
+            return 1.0
+        market_net = self._net_at(contracts, spot, now, at_current_spot=True)
+        if market_net == bs_net:
+            return 1.0
+        calibration = market_net / bs_net
+        if not math.isfinite(calibration) or calibration == 0.0:
+            return 1.0
+        if not MIN_CALIBRATION <= abs(calibration) <= MAX_CALIBRATION:
+            logger.warning(
+                "Broker gamma implies an absurd calibration factor (%.4g); "
+                "falling back to a pure Black-Scholes zero-gamma curve",
+                calibration,
+            )
+            return 1.0
+        return calibration
+
     def _zero_gamma(
         self, contracts: list[OptionContract], spot: float, now: datetime
     ) -> float | None:
@@ -248,6 +304,14 @@ class GEXCalculator:
         with spot itself as the midpoint sample, so resolution near spot no
         longer depends on how far out the chain's widest strike happens to
         sit.
+
+        Every sample is Black-Scholes gamma scaled by one calibration
+        constant (see _market_calibration()), so the curve is continuous and
+        anchored to the headline net_gex at spot. It is deliberately NOT
+        built by swapping in the broker's gamma for the sample at spot:
+        broker and BS gamma are different numbers, so that one substitution
+        puts a step discontinuity at the exact price of interest and can
+        create a pair of adjacent crossings out of nothing.
         """
         if spot <= 0 or not contracts:
             return None
@@ -256,11 +320,10 @@ class GEXCalculator:
             spot + step * offset
             for offset in range(-ZERO_GAMMA_HALF_STEPS, ZERO_GAMMA_HALF_STEPS + 1)
         ]
+        calibration = self._market_calibration(contracts, spot, now)
         values = [
-            self._net_at(
-                contracts, level, now, at_current_spot=(index == ZERO_GAMMA_HALF_STEPS)
-            )
-            for index, level in enumerate(levels)
+            calibration * self._net_at(contracts, level, now, at_current_spot=False)
+            for level in levels
         ]
         crossings: list[float] = []
         for index, (left, right) in enumerate(zip(values, values[1:])):
