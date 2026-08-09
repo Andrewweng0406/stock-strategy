@@ -112,9 +112,14 @@ class PlanRepository:
             await session.commit()
         return signed
 
-    async def get_plan(self, plan_id: str) -> UserTradePlan | None:
+    async def get_plan(self, plan_id: str, user_id: str) -> UserTradePlan | None:
         async with self.session_factory() as session:
-            record = await session.get(TradePlanRecord, plan_id)
+            record = await session.scalar(
+                select(TradePlanRecord).where(
+                    TradePlanRecord.plan_id == plan_id,
+                    TradePlanRecord.user_id == user_id,
+                )
+            )
             if record is None:
                 return None
             return UserTradePlan(
@@ -487,7 +492,7 @@ class TradeRepository:
             record.exit_date = close.exit_date
             record.pnl = close.pnl
             record.pnl_pct = (
-                close.pnl / (record.entry_price * record.position_size)
+                close.pnl / (record.entry_price * 100 * record.position_size)
             ) * 100
             record.status = TradeStatus.CLOSED.value
             if close.notes is not None:

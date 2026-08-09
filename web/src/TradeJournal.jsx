@@ -420,6 +420,14 @@ export default function TradeJournalPanel({ userId, onClose }) {
                           </li>
                         ))}
                       </ul>
+                      <button
+                        type="button"
+                        onClick={() => triggerReview(t.id)}
+                        disabled={reviewingId === t.id}
+                        className="self-start text-[10px] text-[#57575c] hover:text-[#c9a15c] disabled:opacity-50 transition-colors"
+                      >
+                        {reviewingId === t.id ? "分析中…" : "🔄 重新分析"}
+                      </button>
                     </div>
                   ) : (
                     <button

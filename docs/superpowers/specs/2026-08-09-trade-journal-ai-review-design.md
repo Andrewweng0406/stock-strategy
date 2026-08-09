@@ -40,17 +40,17 @@ dev database and the cloud Postgres deployment. No Postgres-only types.
 | `user_id` | `String(128)`, indexed | |
 | `ticker` | `String(32)`, indexed | |
 | `strategy_type` | `String(128)` | e.g. "Bull Put Spread", "Long Call" |
-| `source_plan_id` | `String(36)`, nullable, FK → `trade_plans.plan_id` | |
+| `source_plan_id` | `String(36)`, nullable | app-level reference to `trade_plans.plan_id` — no SQL `ForeignKey`, matching this file's existing no-FK convention |
 | `entry_date` | `DateTime(timezone=True)` | |
 | `exit_date` | `DateTime(timezone=True)`, nullable | |
 | `entry_price` | `Float` | |
 | `exit_price` | `Float`, nullable | |
 | `position_size` | `Integer` | contracts |
 | `pnl` | `Float`, nullable | user-entered dollar P/L at close (strategy-specific math is not derived — see Open Question resolution below) |
-| `pnl_pct` | `Float`, nullable | backend-computed: `pnl / (entry_price * position_size) * 100` |
+| `pnl_pct` | `Float`, nullable | backend-computed: `pnl / (entry_price * 100 * position_size) * 100` — the `* 100` on `entry_price` is the standard options contract multiplier (one contract = 100 shares of notional), without which `pnl_pct` comes out 100x too large |
 | `status` | `String(16)`, indexed | `OPEN` \| `CLOSED` |
 | `notes` | `Text`, nullable | |
-| `entry_gex_snapshot_id` | `Integer`, nullable, FK → `gex_snapshots.id` | |
+| `entry_gex_snapshot_id` | `Integer`, nullable | app-level reference to `gex_snapshots.id`, same no-FK convention; `None` when the snapshot at creation time came from mock data (see execution-score/review section) |
 | `created_at` | `DateTime(timezone=True)` | |
 
 ### `trade_reviews`

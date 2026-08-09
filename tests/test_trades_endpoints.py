@@ -96,7 +96,7 @@ def test_close_trade_computes_pnl_pct(monkeypatch) -> None:
             json={
                 "exit_price": 120.0,
                 "exit_date": datetime.now(timezone.utc).isoformat(),
-                "pnl": 20.0,
+                "pnl": 2000.0,
             },
         )
     assert response.status_code == 200
@@ -161,7 +161,7 @@ def test_review_trade_upserts_review_with_fake_llm(monkeypatch) -> None:
             json={
                 "exit_price": 120.0,
                 "exit_date": datetime.now(timezone.utc).isoformat(),
-                "pnl": 20.0,
+                "pnl": 2000.0,
             },
         )
 

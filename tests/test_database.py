@@ -177,7 +177,7 @@ async def test_plan_repository_get_plan_round_trips() -> None:
     )
     await repo.save_signed_plan(plan)
 
-    fetched = await repo.get_plan(str(plan.plan_id))
+    fetched = await repo.get_plan(str(plan.plan_id), "user-1")
     assert fetched is not None
     assert fetched.ticker == "AAPL"
     assert fetched.status == PlanStatus.SIGNED
@@ -186,7 +186,28 @@ async def test_plan_repository_get_plan_round_trips() -> None:
 @pytest.mark.asyncio
 async def test_plan_repository_get_plan_returns_none_when_missing() -> None:
     repo = PlanRepository(await _session_factory())
-    assert await repo.get_plan(str(uuid4())) is None
+    assert await repo.get_plan(str(uuid4()), "user-1") is None
+
+
+@pytest.mark.asyncio
+async def test_plan_repository_get_plan_returns_none_for_wrong_user() -> None:
+    repo = PlanRepository(await _session_factory())
+    plan = UserTradePlan(
+        plan_id=uuid4(),
+        user_id="user-1",
+        conversation_id="conv-1",
+        ticker="AAPL",
+        strategy_type="Long Call",
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=120.0,
+        max_loss_usd=250.0,
+        theta_warning=False,
+    )
+    await repo.save_signed_plan(plan)
+
+    fetched = await repo.get_plan(str(plan.plan_id), "someone-else")
+    assert fetched is None
 
 
 @pytest.mark.asyncio
@@ -254,7 +275,7 @@ async def test_trade_repository_close_trade_computes_pnl_pct() -> None:
         TradeClose(
             exit_price=120.0,
             exit_date=datetime.now(timezone.utc),
-            pnl=20.0,
+            pnl=2000.0,
         ),
     )
     assert closed.status == TradeStatus.CLOSED

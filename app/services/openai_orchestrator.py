@@ -377,7 +377,7 @@ precise, probability-aware advice from the authoritative market context below.
     def _review_instructions(
         self,
         trade: Trade,
-        entry_snapshot: OptionGEXSummary | Any | None,
+        entry_snapshot: GEXSnapshot | None,
         execution_score: int,
     ) -> str:
         context = json.dumps(
@@ -667,7 +667,7 @@ trade. Give a direct, honest post-trade diagnosis.
     async def review_trade(
         self,
         trade: Trade,
-        entry_snapshot: Any | None,
+        entry_snapshot: GEXSnapshot | None,
         execution_score: int,
     ) -> tuple[str, list[str]]:
         if self.client is None:

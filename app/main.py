@@ -417,9 +417,11 @@ async def create_trade(payload: TradeCreate, services: Services) -> Trade:
     summary = await services.gex_service.get_summary(
         payload.ticker, payload.days_to_expiration
     )
-    entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
-        payload.ticker.strip().upper(), payload.days_to_expiration, summary
-    )
+    entry_gex_snapshot_id = None
+    if services.market_data.active_mode != "mock":
+        entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
+            payload.ticker.strip().upper(), payload.days_to_expiration, summary
+        )
     return await services.trade_repository.create_trade(
         payload, entry_gex_snapshot_id
     )
@@ -430,9 +432,11 @@ async def list_trades(
     user_id: str,
     services: Services,
     ticker: str | None = None,
-    status: str | None = None,
+    status: TradeStatus | None = None,
 ) -> TradeList:
-    trades = await services.trade_repository.list_trades(user_id, ticker, status)
+    trades = await services.trade_repository.list_trades(
+        user_id, ticker, status.value if status else None
+    )
     return TradeList(trades=trades)
 
 
@@ -453,8 +457,9 @@ async def close_trade(
 
 
 @app.post("/api/v1/trades/{trade_id}/review", response_model=TradeReview)
+@limiter.limit(settings.chat_rate_limit)
 async def review_trade(
-    trade_id: str, user_id: str, services: Services
+    request: Request, trade_id: str, user_id: str, services: Services
 ) -> TradeReview:
     trade = await services.trade_repository.get_trade(trade_id)
     if trade is None:
@@ -472,7 +477,9 @@ async def review_trade(
 
     stop_loss = target_price = None
     if trade.source_plan_id is not None:
-        plan = await services.plan_repository.get_plan(str(trade.source_plan_id))
+        plan = await services.plan_repository.get_plan(
+            str(trade.source_plan_id), trade.user_id
+        )
         if plan is not None:
             stop_loss = plan.stop_loss
             target_price = plan.target_price

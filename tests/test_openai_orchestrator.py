@@ -394,3 +394,49 @@ async def test_review_trade_without_source_plan_marks_has_source_plan_false() ->
 
     assert '"has_source_plan": false' in fake_responses.request["instructions"]
     assert '"entry_gex_context": null' in fake_responses.request["instructions"]
+
+
+def test_review_instructions_forbids_market_maker_intent_claims() -> None:
+    """Behavior rule 3 says GEX references must ground strictly in
+    entry_gex_context and never assert claims about market makers' intent
+    or any trader group — mirrors
+    test_system_prompt_requires_mechanical_dealer_hedging_scenario_not_intent
+    for the chat-side prompt, but for the post-trade review prompt.
+    """
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    trade = Trade(
+        id=uuid4(),
+        user_id="user-1",
+        ticker="AAPL",
+        strategy_type="Long Call",
+        source_plan_id=None,
+        entry_date=datetime.now(timezone.utc),
+        exit_date=datetime.now(timezone.utc),
+        entry_price=100.0,
+        exit_price=120.0,
+        position_size=1,
+        pnl=2000.0,
+        pnl_pct=20.0,
+        status=TradeStatus.CLOSED,
+        notes=None,
+        entry_gex_snapshot_id=1,
+    )
+    entry_snapshot = GEXSnapshot(
+        ticker="AAPL",
+        days_to_expiration=5,
+        captured_at=datetime.now(timezone.utc),
+        underlying_price=100.0,
+        zero_gamma_strike=95.0,
+        call_wall_strike=110.0,
+        put_wall_strike=90.0,
+        net_gex=1_000_000.0,
+        iv_rank=40.0,
+        gex_status=GEXStatus.POS_GAMMA,
+    )
+
+    instructions = orchestrator._review_instructions(trade, entry_snapshot, 4)
+
+    assert (
+        "never assert claims about market makers' intent"
+        in instructions
+    )
