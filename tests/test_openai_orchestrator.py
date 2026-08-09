@@ -169,6 +169,29 @@ def test_system_prompt_contains_trader_risk_framework() -> None:
     assert "estimated daily theta loss" in prompt
 
 
+def test_system_prompt_forbids_reusing_stale_numbers_from_earlier_turns() -> None:
+    """Real bug found via live testing: on free-text replies (no tool call,
+    no detectable directional keyword), the model would repeat Zero
+    Gamma/Wall figures from its own earlier turns in the conversation
+    instead of the fresh numbers in this turn's <context> — even though the
+    context is genuinely re-fetched every message. Without an explicit rule
+    telling it the context always wins over its own conversation history,
+    the model's instinct to stay "consistent" with what it said before
+    produces stale, misleading figures.
+    """
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    risk = RiskProfile(
+        gex_status=GEXStatus.NEG_GAMMA,
+        volatility_regime="HIGH_VOL_TRENDING",
+        risk_level="HIGH",
+        warnings=["High risk/high volatility; accelerated theta decay."],
+        locked_warning=True,
+    )
+    prompt = orchestrator._instructions(gex_summary(), risk, 5)
+    assert "re-fetched fresh for this specific turn" in prompt
+    assert "Never repeat, reuse, or extrapolate a number from your own" in prompt
+
+
 @pytest.mark.asyncio
 async def test_selected_put_forces_tool_and_builds_card() -> None:
     class FakeResponses:
