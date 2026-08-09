@@ -62,6 +62,30 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
     assert trade["entry_gex_snapshot_id"] is not None
     assert trade["exit_price"] is None
     assert trade["pnl_pct"] is None
+    assert trade["direction"] == "LONG"
+    assert trade["credit_debit"] == "DEBIT"
+
+
+def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTDIR")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-direction",
+                "ticker": "TJTESTDIR",
+                "strategy_type": "Ratio Spread",
+                "direction": "NEUTRAL",
+                "credit_debit": "CREDIT",
+                "entry_price": 1.25,
+                "position_size": 2,
+                "days_to_expiration": 30,
+            },
+        )
+    assert response.status_code == 200
+    trade = response.json()
+    assert trade["direction"] == "NEUTRAL"
+    assert trade["credit_debit"] == "CREDIT"
 
 
 def test_list_trades_filters_by_ticker_and_status(monkeypatch) -> None:

@@ -201,11 +201,24 @@ class TradeStatus(str, Enum):
     CLOSED = "CLOSED"
 
 
+class TradeDirection(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    NEUTRAL = "NEUTRAL"
+
+
+class TradeCreditDebit(str, Enum):
+    DEBIT = "DEBIT"
+    CREDIT = "CREDIT"
+
+
 class Trade(StrictModel):
     id: UUID
     user_id: str = Field(min_length=1, max_length=128)
     ticker: str = Field(min_length=1, max_length=32)
     strategy_type: str = Field(min_length=1, max_length=128)
+    direction: TradeDirection = TradeDirection.LONG
+    credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
     source_plan_id: UUID | None = None
     entry_date: datetime
     exit_date: datetime | None = None
@@ -226,6 +239,8 @@ class TradeCreate(StrictModel):
     user_id: str = Field(min_length=1, max_length=128)
     ticker: str = Field(min_length=1, max_length=32)
     strategy_type: str = Field(min_length=1, max_length=128)
+    direction: TradeDirection = TradeDirection.LONG
+    credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
     source_plan_id: UUID | None = None
     entry_date: datetime | None = None
     entry_price: float = Field(gt=0)

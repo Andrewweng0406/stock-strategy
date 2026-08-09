@@ -29,6 +29,8 @@ from app.models import (
     Trade,
     TradeClose,
     TradeCreate,
+    TradeCreditDebit,
+    TradeDirection,
     TradeReview,
     TradeStatus,
     UserProfile,
@@ -578,6 +580,10 @@ class TradeRecord(Base):
     user_id: Mapped[str] = mapped_column(String(128), index=True)
     ticker: Mapped[str] = mapped_column(String(32), index=True)
     strategy_type: Mapped[str] = mapped_column(String(128))
+    direction: Mapped[str] = mapped_column(String(16), default=TradeDirection.LONG.value)
+    credit_debit: Mapped[str] = mapped_column(
+        String(16), default=TradeCreditDebit.DEBIT.value
+    )
     source_plan_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     entry_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     exit_date: Mapped[datetime | None] = mapped_column(
@@ -594,6 +600,86 @@ class TradeRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+def infer_trade_direction(strategy_type: str) -> TradeDirection:
+    text = strategy_type.lower()
+    if any(token in text for token in ("short", "sell", "covered call", "cash-secured")):
+        return TradeDirection.SHORT
+    if "iron condor" in text or "butterfly" in text or "calendar" in text:
+        return TradeDirection.NEUTRAL
+    if "bear" in text or "put" in text:
+        return TradeDirection.SHORT
+    return TradeDirection.LONG
+
+
+def infer_trade_credit_debit(strategy_type: str) -> TradeCreditDebit:
+    text = strategy_type.lower()
+    if any(
+        token in text
+        for token in ("credit", "covered call", "cash-secured", "iron condor")
+    ):
+        return TradeCreditDebit.CREDIT
+    return TradeCreditDebit.DEBIT
+
+
+def ensure_trade_direction_columns(connection) -> None:
+    table = TradeRecord.__tablename__
+    if table not in set(inspect(connection).get_table_names()):
+        return
+
+    columns = {
+        column["name"]: column for column in inspect(connection).get_columns(table)
+    }
+    added_column = False
+    if "direction" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN direction VARCHAR(16) "
+            f"NOT NULL DEFAULT '{TradeDirection.LONG.value}'"
+        )
+        added_column = True
+    if "credit_debit" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN credit_debit VARCHAR(16) "
+            f"NOT NULL DEFAULT '{TradeCreditDebit.DEBIT.value}'"
+        )
+        added_column = True
+    if not added_column:
+        return
+
+    connection.exec_driver_sql(
+        f"""
+        UPDATE {table}
+        SET
+            direction = CASE
+                WHEN lower(strategy_type) LIKE '%iron condor%'
+                  OR lower(strategy_type) LIKE '%butterfly%'
+                  OR lower(strategy_type) LIKE '%calendar%' THEN '{TradeDirection.NEUTRAL.value}'
+                WHEN lower(strategy_type) LIKE '%short%'
+                  OR lower(strategy_type) LIKE '%sell%'
+                  OR lower(strategy_type) LIKE '%covered call%'
+                  OR lower(strategy_type) LIKE '%cash-secured%'
+                  OR lower(strategy_type) LIKE '%bear%'
+                  OR lower(strategy_type) LIKE '%put%' THEN '{TradeDirection.SHORT.value}'
+                ELSE '{TradeDirection.LONG.value}'
+            END
+        WHERE direction IS NULL OR direction = '{TradeDirection.LONG.value}'
+        """
+    )
+    connection.exec_driver_sql(
+        f"""
+        UPDATE {table}
+        SET credit_debit = CASE
+            WHEN lower(strategy_type) LIKE '%credit%'
+              OR lower(strategy_type) LIKE '%covered call%'
+              OR lower(strategy_type) LIKE '%cash-secured%'
+              OR lower(strategy_type) LIKE '%iron condor%' THEN '{TradeCreditDebit.CREDIT.value}'
+            ELSE '{TradeCreditDebit.DEBIT.value}'
+        END
+        WHERE credit_debit IS NULL
+           OR credit_debit = '{TradeCreditDebit.DEBIT.value}'
+        """
+    )
+
+
 class TradeRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -607,6 +693,8 @@ class TradeRepository:
             user_id=create.user_id,
             ticker=create.ticker.strip().upper(),
             strategy_type=create.strategy_type,
+            direction=create.direction.value,
+            credit_debit=create.credit_debit.value,
             source_plan_id=(
                 str(create.source_plan_id) if create.source_plan_id else None
             ),
@@ -675,6 +763,8 @@ class TradeRepository:
             user_id=record.user_id,
             ticker=record.ticker,
             strategy_type=record.strategy_type,
+            direction=TradeDirection(record.direction),
+            credit_debit=TradeCreditDebit(record.credit_debit),
             source_plan_id=record.source_plan_id,
             entry_date=_as_utc(record.entry_date),
             exit_date=_as_utc(record.exit_date),

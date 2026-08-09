@@ -14,6 +14,8 @@ from app.models import (
     OptionGEXSummary,
     RiskProfile,
     Trade,
+    TradeCreditDebit,
+    TradeDirection,
     TradeStatus,
     UserProfile,
 )
@@ -313,6 +315,8 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
         user_id="user-1",
         ticker="AAPL",
         strategy_type="Long Call",
+        direction=TradeDirection.SHORT,
+        credit_debit=TradeCreditDebit.CREDIT,
         source_plan_id=uuid4(),
         entry_date=datetime.now(timezone.utc),
         exit_date=datetime.now(timezone.utc),
@@ -347,6 +351,8 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
         "name": "submit_trade_review",
     }
     assert '"execution_score": 5' in fake_responses.request["instructions"]
+    assert '"direction": "SHORT"' in fake_responses.request["instructions"]
+    assert '"credit_debit": "CREDIT"' in fake_responses.request["instructions"]
     assert ai_feedback == "Exit respected the plan."
     assert key_takeaways == ["Booked profit near target", "Stuck to the stop"]
 

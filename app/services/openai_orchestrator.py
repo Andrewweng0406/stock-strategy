@@ -523,6 +523,8 @@ precise, probability-aware advice from the authoritative market context below.
             {
                 "ticker": trade.ticker,
                 "strategy_type": trade.strategy_type,
+                "direction": trade.direction.value,
+                "credit_debit": trade.credit_debit.value,
                 "entry_price": trade.entry_price,
                 "exit_price": trade.exit_price,
                 "position_size": trade.position_size,

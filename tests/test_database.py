@@ -15,6 +15,7 @@ from app.database import (
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
+    ensure_trade_direction_columns,
     relax_gex_snapshot_level_columns,
 )
 from app.models import (
@@ -23,6 +24,8 @@ from app.models import (
     PlanStatus,
     TradeClose,
     TradeCreate,
+    TradeCreditDebit,
+    TradeDirection,
     TradeStatus,
     UserProfileUpdate,
     UserTradePlan,
@@ -265,6 +268,26 @@ async def test_trade_repository_create_honors_explicit_entry_date() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trade_repository_create_persists_direction_and_credit_debit() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1",
+            ticker="AAPL",
+            strategy_type="Ratio Spread",
+            direction=TradeDirection.NEUTRAL,
+            credit_debit=TradeCreditDebit.CREDIT,
+            entry_price=100.0,
+            position_size=1,
+            days_to_expiration=30,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    assert trade.direction == TradeDirection.NEUTRAL
+    assert trade.credit_debit == TradeCreditDebit.CREDIT
+
+
+@pytest.mark.asyncio
 async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
     repo = TradeRepository(await _session_factory())
     await repo.create_trade(
@@ -397,6 +420,60 @@ CREATE TABLE gex_snapshots (
     gex_status VARCHAR(16) NOT NULL
 )
 """
+
+LEGACY_TRADES_DDL = """
+CREATE TABLE trades (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    user_id VARCHAR(128) NOT NULL,
+    ticker VARCHAR(32) NOT NULL,
+    strategy_type VARCHAR(128) NOT NULL,
+    source_plan_id VARCHAR(36),
+    entry_date DATETIME NOT NULL,
+    exit_date DATETIME,
+    entry_price FLOAT NOT NULL,
+    exit_price FLOAT,
+    position_size INTEGER NOT NULL,
+    pnl FLOAT,
+    pnl_pct FLOAT,
+    status VARCHAR(16) NOT NULL,
+    notes TEXT,
+    entry_gex_snapshot_id INTEGER,
+    created_at DATETIME NOT NULL
+)
+"""
+
+
+def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(LEGACY_TRADES_DDL)
+        connection.exec_driver_sql(
+            "INSERT INTO trades VALUES "
+            "('trade-1', 'user-1', 'AAPL', 'Bull Put Credit Spread', NULL, "
+            "'2026-08-01 00:00:00', NULL, 1.0, NULL, 1, NULL, NULL, 'OPEN', "
+            "NULL, NULL, '2026-08-01 00:00:00')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO trades VALUES "
+            "('trade-2', 'user-1', 'AAPL', 'Defined-Risk Iron Condor', NULL, "
+            "'2026-08-01 00:00:00', NULL, 1.0, NULL, 1, NULL, NULL, 'OPEN', "
+            "NULL, NULL, '2026-08-01 00:00:00')"
+        )
+
+        ensure_trade_direction_columns(connection)
+        ensure_trade_direction_columns(connection)
+
+        columns = {column["name"]: column for column in inspect(connection).get_columns("trades")}
+        assert columns["direction"]["nullable"] is False
+        assert columns["credit_debit"]["nullable"] is False
+        rows = connection.exec_driver_sql(
+            "SELECT id, direction, credit_debit FROM trades ORDER BY id"
+        ).all()
+
+    assert rows == [
+        ("trade-1", "SHORT", "CREDIT"),
+        ("trade-2", "NEUTRAL", "CREDIT"),
+    ]
 
 
 @pytest.mark.asyncio

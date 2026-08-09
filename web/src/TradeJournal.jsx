@@ -18,6 +18,17 @@ const COMMON_STRATEGY_TYPES = [
   "Defined-Risk Iron Condor",
 ];
 
+const TRADE_DIRECTIONS = [
+  { value: "LONG", label: "看多" },
+  { value: "SHORT", label: "看空" },
+  { value: "NEUTRAL", label: "中性" },
+];
+
+const CREDIT_DEBIT_TYPES = [
+  { value: "DEBIT", label: "Debit" },
+  { value: "CREDIT", label: "Credit" },
+];
+
 // One options contract controls 100 shares. The backend uses the same
 // multiplier when it derives pnl_pct (pnl / (entry_price * 100 * size) * 100),
 // so the close form's derived figures have to match it exactly.
@@ -66,6 +77,25 @@ const CREDIT_STRATEGY_RE = /credit|covered\s*call|cash[-\s]?secured|iron\s*condo
 
 function isCreditStrategy(strategyType) {
   return CREDIT_STRATEGY_RE.test(String(strategyType || ""));
+}
+
+function inferDirection(strategyType) {
+  const text = String(strategyType || "").toLowerCase();
+  if (/(iron\s*condor|butterfly|calendar)/i.test(text)) return "NEUTRAL";
+  if (/(bear|put|short|sell|covered\s*call|cash[-\s]?secured)/i.test(text)) return "SHORT";
+  return "LONG";
+}
+
+function inferCreditDebit(strategyType) {
+  return isCreditStrategy(strategyType) ? "CREDIT" : "DEBIT";
+}
+
+function directionLabel(value) {
+  return TRADE_DIRECTIONS.find((option) => option.value === value)?.label || value || "—";
+}
+
+function creditDebitLabel(value) {
+  return CREDIT_DEBIT_TYPES.find((option) => option.value === value)?.label || value || "—";
 }
 
 /**
@@ -130,6 +160,8 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
   const [draft, setDraft] = useState({
     ticker: (ticker || "").toUpperCase(),
     strategyType: "",
+    direction: "LONG",
+    creditDebit: "DEBIT",
     entryPrice: "",
     positionSize: "1",
     entryDate: defaultLocalDateTimeInput(),
@@ -273,6 +305,8 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
           user_id: userId,
           ticker: tickerValue,
           strategy_type: strategyValue,
+          direction: draft.direction,
+          credit_debit: draft.creditDebit,
           entry_price: entryPrice,
           position_size: positionSize,
           entry_date: draft.entryDate
@@ -293,6 +327,8 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
       setDraft({
         ticker: (ticker || "").toUpperCase(),
         strategyType: "",
+        direction: "LONG",
+        creditDebit: "DEBIT",
         entryPrice: "",
         positionSize: "1",
         entryDate: defaultLocalDateTimeInput(),
@@ -395,7 +431,9 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
   // Direction comes from the *trade being closed*, not the create form's
   // strategy field — that field belongs to a different (possibly empty,
   // possibly unrelated) draft.
-  const closingIsCredit = closingTrade ? isCreditStrategy(closingTrade.strategy_type) : false;
+  const closingIsCredit = closingTrade
+    ? (closingTrade.credit_debit || inferCreditDebit(closingTrade.strategy_type)) === "CREDIT"
+    : false;
   const derivedClose = closingTrade
     ? deriveClosePnl(
         closingTrade.entry_price,
@@ -446,7 +484,14 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
             />
             <input
               value={draft.strategyType}
-              onChange={(e) => updateDraft({ strategyType: e.target.value })}
+              onChange={(e) => {
+                const strategyType = e.target.value;
+                updateDraft({
+                  strategyType,
+                  direction: inferDirection(strategyType),
+                  creditDebit: inferCreditDebit(strategyType),
+                });
+              }}
               placeholder="策略類型（可挑選或自行輸入）"
               list="trade-journal-strategy-types"
               className={`flex-1 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -456,6 +501,30 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                 <option key={s} value={s} />
               ))}
             </datalist>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={draft.direction}
+              onChange={(e) => updateDraft({ direction: e.target.value })}
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            >
+              {TRADE_DIRECTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  方向 · {option.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={draft.creditDebit}
+              onChange={(e) => updateDraft({ creditDebit: e.target.value })}
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            >
+              {CREDIT_DEBIT_TYPES.map((option) => (
+                <option key={option.value} value={option.value}>
+                  資流 · {option.label}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="flex gap-2">
             <input
@@ -579,6 +648,9 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                   進場 {fmtDollar(t.entry_price)}/股 × {t.position_size} 口 ×{" "}
                   {CONTRACT_MULTIPLIER} = {fmtDollar(t.entry_price * CONTRACT_MULTIPLIER * t.position_size)}
                 </div>
+                <div className="text-[9.5px] text-[#57575c] mb-2">
+                  方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                </div>
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
                     <div className="flex gap-1.5">
@@ -635,7 +707,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                         </div>
                         <div className="text-[9px] text-[#57575c] mt-0.5">
                           依「{derivedClose.isCredit ? "信用策略（收取權利金）" : "借記策略（買方）"}
-                          」方向計算；若方向判斷有誤，請直接以手動損益欄為準。
+                          」計算；若實際成交不同，請直接以手動損益欄為準。
                         </div>
                       </div>
                     )}
@@ -717,6 +789,9 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                   <div className="text-[10.5px] text-[#8d8d93] mb-2">
                     {fmtDollar(t.entry_price)} → {fmtDollar(t.exit_price)} · 損益{" "}
                     {fmtDollar(t.pnl)}
+                  </div>
+                  <div className="text-[9.5px] text-[#57575c] mb-2">
+                    方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                   </div>
 
                   {review ? (
