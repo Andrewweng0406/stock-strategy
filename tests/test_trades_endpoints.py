@@ -199,7 +199,7 @@ def test_get_trade_review_returns_null_before_and_stored_review_after_post(
             },
         )
 
-        before = client.get(f"/api/v1/trades/{trade['id']}/review")
+        before = client.get(f"/api/v1/trades/{trade['id']}/review?user_id=user-9")
         assert before.status_code == 200
         assert before.json() is None
 
@@ -216,7 +216,7 @@ def test_get_trade_review_returns_null_before_and_stored_review_after_post(
         assert posted.status_code == 200
         posted_body = posted.json()
 
-        after = client.get(f"/api/v1/trades/{trade['id']}/review")
+        after = client.get(f"/api/v1/trades/{trade['id']}/review?user_id=user-9")
     assert after.status_code == 200
     after_body = after.json()
     assert after_body is not None
@@ -224,3 +224,21 @@ def test_get_trade_review_returns_null_before_and_stored_review_after_post(
     assert after_body["ai_feedback"] == posted_body["ai_feedback"]
     assert after_body["execution_score"] == posted_body["execution_score"]
     assert after_body["key_takeaways"] == posted_body["key_takeaways"]
+
+
+def test_get_trade_review_rejects_other_users_trade(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTEST10")
+        trade = _create_trade(client, "user-10", "TJTEST10")
+        response = client.get(
+            f"/api/v1/trades/{trade['id']}/review?user_id=someone-else"
+        )
+    assert response.status_code == 403
+
+
+def test_get_trade_review_returns_404_for_unknown_trade() -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/trades/does-not-exist/review?user_id=user-11"
+        )
+    assert response.status_code == 404

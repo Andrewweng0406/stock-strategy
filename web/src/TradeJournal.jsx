@@ -82,7 +82,9 @@ export default function TradeJournalPanel({ userId, onClose }) {
     const entries = await Promise.all(
       closedTrades.map(async (t) => {
         try {
-          const res = await fetch(`${BASE_URL}/api/v1/trades/${t.id}/review`);
+          const res = await fetch(
+            `${BASE_URL}/api/v1/trades/${t.id}/review?user_id=${userId}`
+          );
           if (!res.ok) return null;
           const review = await res.json();
           return review ? [t.id, review] : null;

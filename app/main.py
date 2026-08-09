@@ -498,5 +498,14 @@ async def review_trade(
 
 
 @app.get("/api/v1/trades/{trade_id}/review", response_model=TradeReview | None)
-async def get_trade_review(trade_id: str, services: Services) -> TradeReview | None:
+async def get_trade_review(
+    trade_id: str, user_id: str, services: Services
+) -> TradeReview | None:
+    trade = await services.trade_repository.get_trade(trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.user_id != user_id:
+        raise HTTPException(
+            status_code=403, detail="The trade belongs to a different user"
+        )
     return await services.trade_review_repository.get_review(trade_id)
