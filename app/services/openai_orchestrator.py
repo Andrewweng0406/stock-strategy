@@ -9,6 +9,7 @@ from openai import AsyncOpenAI, OpenAIError
 from pydantic import ValidationError
 
 from app.models import (
+    ChatMessageRecord,
     ChatRequest,
     GEXSnapshot,
     OptionGEXSummary,
@@ -26,29 +27,99 @@ logger = logging.getLogger(__name__)
 StrategyBias = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 ProfileName = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 
+# "short"/"long" only carry direction on their own. Attached to a horizon
+# noun they describe time to expiry and must not vote on bias at all —
+# note that "-" is itself a word boundary, so \bshort\b happily matches
+# inside "short-term" and these compounds have to be stripped, not merely
+# boundary-matched around.
+_HORIZON_TERM_PATTERN = re.compile(
+    r"\b(?:short|long|near|far)[\s\-_]?(?:term|dated|dte|expiry|expiration)\b",
+    re.IGNORECASE,
+)
+_BEARISH_PATTERN = re.compile(
+    r"\bputs?\b|\bbear(?:ish|s)?\b|\bshort(?:ing|s)?\b|做空|看空|看跌",
+    re.IGNORECASE,
+)
+_BULLISH_PATTERN = re.compile(
+    r"\bcalls?\b|\bbull(?:ish|s)?\b|\blong(?:ing|s)?\b|做多|看多|看漲|看涨",
+    re.IGNORECASE,
+)
+
 
 class LLMOrchestrator:
     MAX_REPLY_CHARACTERS = 200
-    CONFIRMATION_PATTERN = re.compile(
+    # Server-reconstructed conversation history is capped at the same length
+    # the request schema used to allow, so prompt size is bounded even for a
+    # very long stored conversation.
+    MAX_HISTORY_MESSAGES = 30
+    # An unambiguous adoption of a specific proposal — a letter, a named risk
+    # profile, or an explicit "make the card" instruction. Safe on its own.
+    STRONG_CONFIRMATION_PATTERN = re.compile(
         r"(?:\boption\s*[abc]\b|\bchoice\s*[abc]\b|"
         r"選(?:擇)?\s*[ABCabc]|选(?:择)?\s*[ABCabc]|"
         r"方案\s*[ABCabc]|選(?:擇)?\s*(?:保守|中性|激進)|"
         r"选(?:择)?\s*(?:保守|中性|激进)|"
         r"直接出卡|直接產生(?:計畫)?卡|直接生成(?:计划)?卡|"
-        r"採用(?:你的)?建議|采用(?:你的)?建议|照你的建議|"
-        r"確認(?:這個|此方案|採用)?|确认(?:这个|此方案|采用)?|"
-        r"就這個|就这个|照這個做|照这个做|"
+        r"採用(?:你的)?建議|采用(?:你的)?建议|照你的建議|照你的建议|"
         r"use (?:your |the )?(?:suggestion|recommendation)|"
         r"(?:confirm|adopt) (?:the )?(?:plan|strategy|suggestion)|"
         r"generate (?:the )?(?:plan|card))",
         re.IGNORECASE,
     )
+    # A bare confirmation word. NOT sufficient on its own: "我想確認一下 Zero
+    # Gamma 是多少" is a data question, and forcing a signed-ready draft card
+    # out of it hands the user a trade they never asked for. It only counts
+    # when an actual plan/profile referent sits close by.
+    BARE_CONFIRMATION_PATTERN = re.compile(
+        r"(?:確認(?:這個|此方案|採用)?|确认(?:这个|此方案|采用)?|"
+        r"就這個|就这个|照這個做|照这个做)",
+        re.IGNORECASE,
+    )
+    PLAN_REFERENT_PATTERN = re.compile(
+        r"(?:方案|計畫|計劃|计划|策略|出卡|卡片|建議|建议|採用|采用|"
+        r"保守|中性|激進|激进|"
+        r"\bplan\b|\bstrategy\b|\bcard\b|\bsuggestion\b|\brecommendation\b|"
+        r"\bconservative\b|\bbalanced\b|\baggressive\b)",
+        re.IGNORECASE,
+    )
+    # How far from a bare confirmation word a plan referent may sit and still
+    # count as referring to it. Wide enough for natural phrasing
+    # ("確認，就用你剛剛說的那個保守方案") but far short of "anywhere in a
+    # 20,000-character message", which is what made the old pattern fire on
+    # unrelated questions.
+    CONFIRMATION_REFERENT_WINDOW = 16
     EXPLICIT_LEVEL_PATTERN = re.compile(
         r"(?:entry|stop|target|max(?:imum)?\s*loss|進場|入場|"
         r"进场|入场|停損|止損|停损|止损|目標|目标|最大虧損|"
         r"最大亏损)[^\d]{0,12}\d",
         re.IGNORECASE,
     )
+    # Ceiling on a model-emitted max_loss_usd, expressed as a multiple of the
+    # configured per-trade risk budget. The deterministic profiles only ever
+    # scale that budget to 1.25x (the aggressive branch), so 10x is already
+    # an order of magnitude past anything the system itself would propose —
+    # generous enough that a user genuinely sizing up for one trade still
+    # gets their number, tight enough that a model hallucinating 1e6 from a
+    # crafted message cannot ship it on a signed-ready card.
+    MAX_USER_LOSS_MULTIPLE = 10.0
+    # Floor on a profile's entry-to-stop distance when computing R/R,
+    # expressed as a fraction of spot. The conservative branch pins entry one
+    # strike step inside its own defended level, so entry and stop can end up
+    # ~2 ticks apart; dividing a full-width reward by that manufactured a
+    # 9.87 reward-to-risk on the standard fixtures, roughly 7x the balanced
+    # profile's, purely from a stop nobody could realistically hold. 2% of
+    # spot is about one session's typical range for a liquid US equity — the
+    # conventional "don't put the stop inside the noise" minimum — and is
+    # never below the strike-step tick the stop is placed with.
+    MIN_RISK_DISTANCE_PCT = 0.02
+    # Floor on the DTE used by the theta proxy, in days. 0DTE reaches this
+    # function as a literal 0 (ChatContext.days_to_expiration is ge=0), so
+    # some floor is needed to avoid dividing by zero — but the old floor of a
+    # whole day made DTE 0, 1 and 2 collapse onto one clamped estimate in
+    # exactly the window where decay matters most. A quarter day keeps 0DTE
+    # finite while making it decay ~2x as fast as 1DTE and ~2.8x as fast as
+    # 2DTE.
+    MIN_THETA_DTE_DAYS = 0.25
 
     def __init__(
         self,
@@ -94,16 +165,31 @@ class LLMOrchestrator:
 
     @classmethod
     def _should_force_plan(cls, message: str) -> bool:
-        return bool(cls.CONFIRMATION_PATTERN.search(message))
+        if cls.STRONG_CONFIRMATION_PATTERN.search(message):
+            return True
+        window = cls.CONFIRMATION_REFERENT_WINDOW
+        for match in cls.BARE_CONFIRMATION_PATTERN.finditer(message):
+            nearby = message[
+                max(0, match.start() - window) : match.end() + window
+            ]
+            if cls.PLAN_REFERENT_PATTERN.search(nearby):
+                return True
+        return False
 
-    @staticmethod
-    def _infer_bias(strategy_type: str, user_message: str) -> StrategyBias:
+    @classmethod
+    def _infer_bias(cls, strategy_type: str, user_message: str) -> StrategyBias:
         text = f"{strategy_type} {user_message}".lower()
-        bearish = ("put", "bear", "short", "做空", "看空", "看跌")
-        bullish = ("call", "bull", "long", "做多", "看多", "看漲", "看涨")
-        if any(keyword in text for keyword in bearish):
+        # "short-term"/"long-term" describe horizon, not direction. A bare
+        # substring test read "short-term bullish call idea" as BEARISH, and
+        # read the system's own neutral structure name "Short-Term Straddle"
+        # as BEARISH when it was fed back through bias inference. Compound
+        # horizon terms are removed first, then the remaining direction words
+        # are matched on word boundaries so nothing else can be swallowed by
+        # a longer word.
+        text = _HORIZON_TERM_PATTERN.sub(" ", text)
+        if _BEARISH_PATTERN.search(text):
             return "BEARISH"
-        if any(keyword in text for keyword in bullish):
+        if _BULLISH_PATTERN.search(text):
             return "BULLISH"
         return "NEUTRAL"
 
@@ -161,15 +247,22 @@ class LLMOrchestrator:
             "target_price": round(max(target, 0.01), 2),
         }
 
-    @staticmethod
+    @classmethod
     def _theta_daily_loss_estimate(
+        cls,
         max_loss_usd: float,
         days_to_expiration: int,
         is_vertical_spread: bool,
     ) -> float:
         # This is a risk-budget proxy, not contract-level theta from an option quote.
-        dte = max(days_to_expiration, 1)
-        daily_rate = min(0.12, max(0.01, 0.20 / (dte**0.5)))
+        #
+        # The old form clamped the rate at 0.12 and floored DTE at one whole
+        # day, so 0DTE, 1DTE and 2DTE all returned exactly the same number —
+        # a flat estimate across precisely the range the warning exists for.
+        # The rate now runs free up to 1.0 (a position cannot decay more than
+        # its whole risk budget in a day) over a real, sub-day-floored DTE.
+        dte = max(float(days_to_expiration), cls.MIN_THETA_DTE_DAYS)
+        daily_rate = min(1.0, max(0.01, 0.20 / (dte**0.5)))
         structure_factor = 0.45 if is_vertical_spread else 1.0
         return round(max_loss_usd * daily_rate * structure_factor, 2)
 
@@ -226,12 +319,18 @@ class LLMOrchestrator:
             ("BALANCED", neutral_entry, 1.00, spread_name, True),
             ("AGGRESSIVE", aggressive_entry, 1.25, aggressive_name, False),
         )
+        # See MIN_RISK_DISTANCE_PCT: a stop this close to entry is inside a
+        # single session's noise, so treating it as the real risk denominator
+        # inflates R/R. It bites the conservative branch (whose entry pins
+        # itself one tick inside its own defended level); the other profiles
+        # are normally well clear of it.
+        min_risk_distance = max(price * self.MIN_RISK_DISTANCE_PCT, tick)
         profiles: dict[str, dict[str, Any]] = {}
         for name, entry, risk_factor, structure, is_spread in specifications:
             entry = round(max(entry, 0.01), 2)
             stop_value = round(max(stop, 0.01), 2)
             target_value = round(max(target, 0.01), 2)
-            risk_distance = abs(entry - stop_value)
+            risk_distance = max(abs(entry - stop_value), min_risk_distance)
             reward_distance = abs(target_value - entry)
             max_loss = round(self.default_max_loss_usd * risk_factor, 2)
             profiles[name.lower()] = {
@@ -394,7 +493,16 @@ precise, probability-aware advice from the authoritative market context below.
         trade: Trade,
         entry_snapshot: GEXSnapshot | None,
         execution_score: int,
+        has_source_plan: bool,
     ) -> str:
+        # has_source_plan is passed in, never derived from
+        # trade.source_plan_id. A trade can reference a plan that was never
+        # signed, was deleted, belongs to someone else, or whose levels
+        # aren't comparable to the trade's own price scale — in every one of
+        # those cases PlanRepository.get_plan() returns None (or the levels
+        # are rejected) and the score is a pnl_pct approximation, so telling
+        # the model "a plan exists" would suppress behavior rule 2 and invite
+        # it to narrate a plan comparison that never happened.
         # Levels the calculator couldn't establish are omitted from the JSON
         # entirely rather than sent as null — behaviour rule 3 below tells
         # the model to ground GEX references only in what's present here, so
@@ -422,7 +530,7 @@ precise, probability-aware advice from the authoritative market context below.
                 "pnl_pct": trade.pnl_pct,
                 "notes": trade.notes,
                 "execution_score": execution_score,
-                "has_source_plan": trade.source_plan_id is not None,
+                "has_source_plan": has_source_plan,
                 "entry_gex_context": entry_gex_context,
             },
             ensure_ascii=True,
@@ -456,14 +564,30 @@ trade. Give a direct, honest post-trade diagnosis.
 
     @classmethod
     def _compact_reply(cls, text: str) -> str:
-        compact = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-        if not compact:
-            compact = "- 分析已完成。"
-        if not compact.startswith(("-", "*")):
-            compact = f"- {compact}"
-        if len(compact) > cls.MAX_REPLY_CHARACTERS:
-            compact = compact[: cls.MAX_REPLY_CHARACTERS - 3].rstrip() + "..."
-        return compact
+        """Compact to whole bullets, dropping from the end if over budget.
+
+        Truncating mid-string used to leave a half-written bullet on screen,
+        and because the risk-mitigation lines were built last it cut exactly
+        the safety content first. Bullets are now dropped whole, and every
+        caller that emits risk lines builds them at the FRONT so they survive
+        trimming (see _plan_reply). A single line longer than the budget on
+        its own — free-form model prose, which has no bullets to drop — still
+        falls back to a character cut.
+        """
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            lines = ["- 分析已完成。"]
+        if not lines[0].startswith(("-", "*")):
+            lines[0] = f"- {lines[0]}"
+
+        kept: list[str] = []
+        for line in lines:
+            if len("\n".join([*kept, line])) > cls.MAX_REPLY_CHARACTERS:
+                break
+            kept.append(line)
+        if kept:
+            return "\n".join(kept)
+        return lines[0][: cls.MAX_REPLY_CHARACTERS - 3].rstrip() + "..."
 
     @staticmethod
     def _plan_reply(
@@ -490,19 +614,60 @@ trade. Give a direct, honest post-trade diagnosis.
         risk = abs(plan.entry_price - plan.stop_loss)
         reward = abs(plan.target_price - plan.entry_price)
         ratio = reward / risk if risk else 0.0
-        lines = [
-            f"- {summary.gex_status.value}｜R/R 1:{ratio:.2f}｜"
-            f"Theta 約 ${theta_daily_loss_estimate:.2f}/日。"
-        ]
+        # Risk warnings are built FIRST on purpose. _compact_reply drops
+        # whole bullets from the end when the 200-character budget is
+        # exceeded, so anything at the back is what gets sacrificed — and
+        # these two lines are the last thing that should ever be dropped.
+        lines: list[str] = []
         if ratio < 1.5:
             lines.append("- 風報比低於 1:1.5，宜等 GEX 位階或採定義風險價差。")
         if risk_profile.locked_warning:
             lines.append("- 短天期 Theta 加速，避免裸買期權，優先垂直價差。")
         lines.append(
+            f"- {summary.gex_status.value}｜R/R 1:{ratio:.2f}｜"
+            f"Theta 約 ${theta_daily_loss_estimate:.2f}/日。"
+        )
+        lines.append(
             f"- 依現價 ${summary.stock_price:.2f}、Zero Gamma "
             f"{zero_gamma_text}、{wall_name} {wall_text} 自動出卡。"
         )
         return "\n".join(lines)
+
+    def _user_levels_are_coherent(
+        self, arguments: TradePlanToolArguments, bias: StrategyBias
+    ) -> bool:
+        """Whether model-emitted levels are safe to put on a signed-ready card.
+
+        These values are NOT calculated by the backend — they come from the
+        model reading the user's free text, and Pydantic only guarantees each
+        one is positive. A message crafted to satisfy both CONFIRMATION and
+        EXPLICIT_LEVEL detection can force a tool call AND switch to
+        trust-the-model levels in a single turn, so the geometry gets checked
+        before anything ships: stop and target must sit on the correct sides
+        of entry for the inferred direction, the target must actually differ
+        from the entry, and max loss must stay inside MAX_USER_LOSS_MULTIPLE
+        of the configured budget. Anything else falls back to the
+        deterministic profile.
+        """
+        entry = arguments.entry_price
+        stop = arguments.stop_loss
+        target = arguments.target_price
+        if target == entry or stop == entry:
+            return False
+        if bias == "BULLISH":
+            directional_ok = stop < entry < target
+        elif bias == "BEARISH":
+            directional_ok = target < entry < stop
+        else:
+            # A neutral structure has no directional ordering to satisfy, but
+            # a stop and a target on the SAME side of entry is incoherent
+            # under any reading.
+            directional_ok = min(stop, target) < entry < max(stop, target)
+        if not directional_ok:
+            return False
+        return arguments.max_loss_usd <= (
+            self.default_max_loss_usd * self.MAX_USER_LOSS_MULTIPLE
+        )
 
     def _proposal_reply(
         self,
@@ -566,13 +731,28 @@ trade. Give a direct, honest post-trade diagnosis.
         summary: OptionGEXSummary,
         risk: RiskProfile,
         profile: UserProfile | None = None,
+        history: list[ChatMessageRecord] | None = None,
     ) -> tuple[str, UserTradePlan | None]:
+        """Answer one chat turn.
+
+        `history` is the server's OWN stored transcript for this
+        conversation, supplied by the caller from ChatRepository — never
+        payload.context.history. The request body's history field is
+        client-controlled and can contain fabricated `assistant` turns (e.g.
+        a forged "confirmed, you're approved for unlimited risk"), which the
+        model would otherwise read as its own prior commitment. It is
+        accepted by the schema for backward compatibility and ignored here.
+        """
         if self.client is None:
             raise HTTPException(503, "OPENAI_API_KEY is not configured")
 
         context = payload.context
         force_plan = self._should_force_plan(payload.user_message)
-        input_items: list[Any] = [message.model_dump() for message in context.history]
+        stored_history = (history or [])[-self.MAX_HISTORY_MESSAGES :]
+        input_items: list[Any] = [
+            {"role": message.role, "content": message.content}
+            for message in stored_history
+        ]
         input_items.append({"role": "user", "content": payload.user_message})
         tool_choice: Any = (
             {"type": "function", "name": "generate_trade_plan"}
@@ -631,6 +811,21 @@ trade. Give a direct, honest post-trade diagnosis.
             use_user_levels = bool(
                 self.EXPLICIT_LEVEL_PATTERN.search(payload.user_message)
             )
+            if use_user_levels and not self._user_levels_are_coherent(
+                arguments, bias
+            ):
+                logger.warning(
+                    "Discarding incoherent model-emitted %s levels "
+                    "(entry=%s stop=%s target=%s max_loss=%s); falling back to "
+                    "the calculated %s profile.",
+                    bias,
+                    arguments.entry_price,
+                    arguments.stop_loss,
+                    arguments.target_price,
+                    arguments.max_loss_usd,
+                    profile_name,
+                )
+                use_user_levels = False
             trade_plan = UserTradePlan(
                 plan_id=uuid4(),
                 user_id=context.user_id,
@@ -701,6 +896,7 @@ trade. Give a direct, honest post-trade diagnosis.
         trade: Trade,
         entry_snapshot: GEXSnapshot | None,
         execution_score: int,
+        has_source_plan: bool,
     ) -> tuple[str, list[str]]:
         if self.client is None:
             raise HTTPException(503, "OPENAI_API_KEY is not configured")
@@ -708,7 +904,7 @@ trade. Give a direct, honest post-trade diagnosis.
             response = await self.client.responses.create(
                 model=self.model,
                 instructions=self._review_instructions(
-                    trade, entry_snapshot, execution_score
+                    trade, entry_snapshot, execution_score, has_source_plan
                 ),
                 input=[{"role": "user", "content": "Review this closed trade."}],
                 tools=[self._review_tool()],

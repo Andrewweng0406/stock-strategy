@@ -5,6 +5,7 @@ import pytest
 from app import analytics, pinning_engine
 from app.analytics import (
     HIGH_RISK_WARNING,
+    IMMINENT_EXPIRY_WARNING,
     GEXCalculator,
     OptionContract,
     _aggregate_oi_by_strike,
@@ -47,6 +48,43 @@ def test_positive_gamma_is_mean_reverting() -> None:
     risk = parse_gex_risk_profile(summary(GEXStatus.POS_GAMMA), 2)
     assert risk.volatility_regime == "LOW_VOL_MEAN_REVERSION"
     assert risk.risk_level == "NORMAL"
+
+
+@pytest.mark.parametrize("days_to_expiration", [0, 1])
+def test_imminent_expiry_locks_even_in_positive_gamma(days_to_expiration) -> None:
+    """A 0DTE/1DTE naked long option used to get no warning at all.
+
+    The lock condition was `dte < 7 AND NEG_GAMMA`, so a contract expiring
+    today in a positive-gamma regime came back locked_warning=False, which
+    then cleared theta_warning on any resulting trade-plan card. Imminent
+    expiry is a risk in its own right, independent of dealer positioning.
+    """
+    risk = parse_gex_risk_profile(
+        summary(GEXStatus.POS_GAMMA), days_to_expiration
+    )
+    assert risk.locked_warning is True
+    assert risk.risk_level == "HIGH"
+    assert risk.warnings == [IMMINENT_EXPIRY_WARNING]
+
+
+def test_short_dated_negative_gamma_still_locks_unchanged() -> None:
+    risk = parse_gex_risk_profile(summary(GEXStatus.NEG_GAMMA), 5)
+    assert risk.locked_warning is True
+    assert risk.warnings == [HIGH_RISK_WARNING]
+
+
+def test_ten_days_positive_gamma_does_not_lock() -> None:
+    """Sanity check that the new OR-ed trigger didn't over-fire."""
+    risk = parse_gex_risk_profile(summary(GEXStatus.POS_GAMMA), 10)
+    assert risk.locked_warning is False
+    assert risk.risk_level == "NORMAL"
+    assert risk.warnings == []
+
+
+def test_zero_dte_negative_gamma_reports_both_reasons() -> None:
+    """Distinct warning strings, so the reason for the lock is never vague."""
+    risk = parse_gex_risk_profile(summary(GEXStatus.NEG_GAMMA), 0)
+    assert risk.warnings == [IMMINENT_EXPIRY_WARNING, HIGH_RISK_WARNING]
 
 
 def _contract(strike: float, option_type: str, open_interest: int) -> OptionContract:

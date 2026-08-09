@@ -65,7 +65,13 @@ from app.models import (
     UserProfileUpdate,
     UserTradePlan,
 )
-from app.services import CloudSync, GEXService, LLMOrchestrator, compute_execution_score
+from app.services import (
+    CloudSync,
+    GEXService,
+    LLMOrchestrator,
+    compute_execution_score,
+    plan_levels_are_usable,
+)
 
 
 _EXPIRATIONS_ADAPTER = TypeAdapter(list[ExpirationInfo])
@@ -273,8 +279,18 @@ async def chat(
     profile = await services.profile_repository.get_profile(
         payload.context.user_id
     )
+    # Conversation history is reconstructed from the server's own store,
+    # scoped to this user, and NOT taken from payload.context.history. The
+    # request body is client-controlled and its entries may claim
+    # role="assistant", so trusting it lets a caller fabricate prior model
+    # commitments ("confirmed, you're approved for unlimited risk") that the
+    # model then treats as its own. The field stays on the request schema for
+    # backward compatibility with existing clients; it is simply ignored.
+    stored = await services.chat_repository.get_messages(
+        payload.context.conversation_id, payload.context.user_id
+    )
     assistant_message, trade_plan = await services.llm.chat(
-        payload, summary, risk, profile
+        payload, summary, risk, profile, stored.messages
     )
     await services.chat_repository.save_message(
         payload.context.conversation_id,
@@ -419,6 +435,34 @@ async def save_plan(
 
 @app.post("/api/v1/trades", response_model=Trade)
 async def create_trade(payload: TradeCreate, services: Services) -> Trade:
+    if payload.source_plan_id is not None:
+        # A source_plan_id is the link the post-trade review grades
+        # discipline against, so an unverified one is worse than none: it
+        # makes the review claim a plan comparison that can't happen.
+        plan = await services.plan_repository.get_plan(
+            str(payload.source_plan_id), payload.user_id
+        )
+        if plan is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "source_plan_id does not exist or belongs to a different user"
+                ),
+            )
+        if plan.ticker != payload.ticker.strip().upper():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"source_plan_id is a plan for {plan.ticker}, "
+                    f"not {payload.ticker.strip().upper()}"
+                ),
+            )
+        # Status is deliberately NOT enforced. A DRAFT plan is still a real,
+        # user-visible set of levels the trade can honestly be graded
+        # against — the plan card exists before signing, and refusing to link
+        # it would push users into recording no plan at all. A ticker
+        # mismatch, by contrast, is unambiguously wrong: those levels can
+        # never describe this trade.
     summary = await services.gex_service.get_summary(
         payload.ticker, payload.days_to_expiration
     )
@@ -464,7 +508,14 @@ async def close_trade(
 @app.post("/api/v1/trades/{trade_id}/review", response_model=TradeReview)
 @limiter.limit(settings.chat_rate_limit)
 async def review_trade(
-    request: Request, trade_id: str, user_id: str, services: Services
+    request: Request,
+    trade_id: str,
+    user_id: str,
+    services: Services,
+    # Every call here is a real OpenAI completion. A double-click or a naive
+    # retry after a network hiccup would otherwise buy a second identical
+    # review; the deliberate "re-analyze" button passes force=true.
+    force: bool = Query(default=False),
 ) -> TradeReview:
     trade = await services.trade_repository.get_trade(trade_id)
     if trade is None:
@@ -480,19 +531,34 @@ async def review_trade(
         )
     assert trade.exit_price is not None and trade.pnl_pct is not None
 
-    stop_loss = target_price = None
+    if not force:
+        cached = await services.trade_review_repository.get_review(trade_id)
+        if cached is not None:
+            return cached
+
+    plan_entry_price = stop_loss = target_price = None
     if trade.source_plan_id is not None:
         plan = await services.plan_repository.get_plan(
             str(trade.source_plan_id), trade.user_id
         )
         if plan is not None:
+            plan_entry_price = plan.entry_price
             stop_loss = plan.stop_loss
             target_price = plan.target_price
 
+    # One predicate decides both the score's path and what the model is told,
+    # so the prose can never claim a plan comparison the score didn't make.
+    # It is False when no plan loaded at all AND when the plan's levels can't
+    # be denominated in the same units as this trade's fill — see
+    # app/services/trade_scoring.py.
+    has_source_plan = plan_levels_are_usable(
+        trade.entry_price, plan_entry_price, stop_loss, target_price
+    )
     execution_score = compute_execution_score(
         entry_price=trade.entry_price,
         exit_price=trade.exit_price,
         pnl_pct=trade.pnl_pct,
+        plan_entry_price=plan_entry_price,
         stop_loss=stop_loss,
         target_price=target_price,
     )
@@ -502,7 +568,7 @@ async def review_trade(
         else None
     )
     ai_feedback, key_takeaways = await services.llm.review_trade(
-        trade, entry_snapshot, execution_score
+        trade, entry_snapshot, execution_score, has_source_plan
     )
     return await services.trade_review_repository.upsert_review(
         trade_id, execution_score, ai_feedback, key_takeaways

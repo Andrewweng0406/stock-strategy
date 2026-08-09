@@ -166,7 +166,9 @@ def test_review_trade_upserts_review_with_fake_llm(monkeypatch) -> None:
         )
 
         class FakeOrchestrator:
-            async def review_trade(self, trade, entry_snapshot, execution_score):
+            async def review_trade(
+                self, trade, entry_snapshot, execution_score, has_source_plan
+            ):
                 return (
                     "Solid, disciplined exit.",
                     ["Booked profit near plan", "Stayed within risk"],
@@ -204,7 +206,9 @@ def test_get_trade_review_returns_null_before_and_stored_review_after_post(
         assert before.json() is None
 
         class FakeOrchestrator:
-            async def review_trade(self, trade, entry_snapshot, execution_score):
+            async def review_trade(
+                self, trade, entry_snapshot, execution_score, has_source_plan
+            ):
                 return (
                     "Solid, disciplined exit.",
                     ["Booked profit near plan", "Stayed within risk"],
@@ -242,3 +246,291 @@ def test_get_trade_review_returns_404_for_unknown_trade() -> None:
             "/api/v1/trades/does-not-exist/review?user_id=user-11"
         )
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Fix 12 — source_plan_id must be validated at trade creation
+# --------------------------------------------------------------------------
+
+
+def _sign_plan(
+    client: TestClient,
+    user_id: str,
+    ticker: str,
+    entry_price: float = 100.0,
+    stop_loss: float = 90.0,
+    target_price: float = 120.0,
+) -> dict:
+    plan_id = str(uuid4())
+    response = client.post(
+        "/api/v1/plans/save",
+        json={
+            "plan": {
+                "plan_id": plan_id,
+                "user_id": user_id,
+                "conversation_id": f"conv-{plan_id[:8]}",
+                "ticker": ticker,
+                "strategy_type": "Bull Call Debit Spread",
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "target_price": target_price,
+                "max_loss_usd": 250.0,
+                "theta_warning": False,
+            }
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def _create_trade_with_plan(
+    client: TestClient,
+    user_id: str,
+    ticker: str,
+    plan_id: str,
+    entry_price: float = 100.0,
+):
+    return client.post(
+        "/api/v1/trades",
+        json={
+            "user_id": user_id,
+            "ticker": ticker,
+            "strategy_type": "Long Call",
+            "source_plan_id": plan_id,
+            "entry_price": entry_price,
+            "position_size": 1,
+            "days_to_expiration": 30,
+        },
+    )
+
+
+def test_create_trade_accepts_a_signed_same_ticker_plan(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJPLAN{suffix}"
+    user_id = f"plan-user-{suffix}"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        plan = _sign_plan(client, user_id, ticker)
+        response = _create_trade_with_plan(client, user_id, ticker, plan["plan_id"])
+    assert response.status_code == 200
+    assert response.json()["source_plan_id"] == plan["plan_id"]
+
+
+def test_create_trade_rejects_unknown_source_plan_id(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJPLAN{suffix}"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        response = _create_trade_with_plan(
+            client, f"plan-user-{suffix}", ticker, str(uuid4())
+        )
+    assert response.status_code == 400
+    assert "does not exist" in response.json()["detail"]
+
+
+def test_create_trade_rejects_another_users_source_plan(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJPLAN{suffix}"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        plan = _sign_plan(client, f"owner-{suffix}", ticker)
+        response = _create_trade_with_plan(
+            client, f"intruder-{suffix}", ticker, plan["plan_id"]
+        )
+    assert response.status_code == 400
+    assert "different user" in response.json()["detail"]
+
+
+def test_create_trade_rejects_ticker_mismatched_source_plan(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    plan_ticker = f"TJPLANA{suffix}"
+    trade_ticker = f"TJPLANB{suffix}"
+    user_id = f"plan-user-{suffix}"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, plan_ticker)
+        _seed_cache(client, monkeypatch, trade_ticker)
+        plan = _sign_plan(client, user_id, plan_ticker)
+        response = _create_trade_with_plan(
+            client, user_id, trade_ticker, plan["plan_id"]
+        )
+    assert response.status_code == 400
+    assert plan_ticker in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Fixes 1 & 2 — the review path's plan flag and units guard, end to end
+# --------------------------------------------------------------------------
+
+
+class _CountingOrchestrator:
+    def __init__(self, feedback: str = "Solid, disciplined exit.") -> None:
+        self.calls = 0
+        self.feedback = feedback
+        self.seen_has_source_plan: list[bool] = []
+        self.seen_scores: list[int] = []
+
+    async def review_trade(
+        self, trade, entry_snapshot, execution_score, has_source_plan
+    ):
+        self.calls += 1
+        self.seen_has_source_plan.append(has_source_plan)
+        self.seen_scores.append(execution_score)
+        return (self.feedback, ["Booked profit near plan"])
+
+
+def test_review_reports_a_plan_when_its_levels_match_the_trades_scale(
+    monkeypatch,
+) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJSCORE{suffix}"
+    user_id = f"score-user-{suffix}"
+    orchestrator = _CountingOrchestrator()
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        plan = _sign_plan(
+            client, user_id, ticker,
+            entry_price=100.0, stop_loss=90.0, target_price=120.0,
+        )
+        trade = _create_trade_with_plan(
+            client, user_id, ticker, plan["plan_id"], entry_price=100.0
+        ).json()
+        client.put(
+            f"/api/v1/trades/{trade['id']}?user_id={user_id}",
+            json={
+                "exit_price": 87.0,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                "pnl": -1300.0,
+            },
+        )
+        app.state.services.llm = orchestrator
+        response = client.post(
+            f"/api/v1/trades/{trade['id']}/review?user_id={user_id}"
+        )
+    assert response.status_code == 200
+    assert orchestrator.seen_has_source_plan == [True]
+    # Plan path: r_multiple = (87 - 100) / 10 = -1.3 -> band 2. The pnl_pct
+    # path would have said 1 for the same -13%, so this pins which ran.
+    assert response.json()["execution_score"] == 2
+
+
+def test_review_falls_back_when_plan_levels_are_underlying_prices(
+    monkeypatch,
+) -> None:
+    """The reported units mismatch, reproduced through the real endpoint.
+
+    Trade.entry_price is an option premium ($4.20); the plan's levels are
+    underlying stock prices. Scoring them against each other produced
+    planned_risk = |4.20 - 298.45| and collapsed every plan-linked review
+    onto the same middling band. The plan must now be treated as
+    non-comparable — both in the score AND in what the model is told, so the
+    prose can't narrate a comparison that didn't happen.
+    """
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJUNITS{suffix}"
+    user_id = f"units-user-{suffix}"
+    orchestrator = _CountingOrchestrator()
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        plan = _sign_plan(
+            client, user_id, ticker,
+            entry_price=306.00, stop_loss=298.45, target_price=332.15,
+        )
+        trade = _create_trade_with_plan(
+            client, user_id, ticker, plan["plan_id"], entry_price=4.20
+        ).json()
+        client.put(
+            f"/api/v1/trades/{trade['id']}?user_id={user_id}",
+            json={
+                "exit_price": 1.05,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                "pnl": -315.0,
+            },
+        )
+        app.state.services.llm = orchestrator
+        response = client.post(
+            f"/api/v1/trades/{trade['id']}/review?user_id={user_id}"
+        )
+    assert response.status_code == 200
+    # Honest "no comparable plan" framing, even though source_plan_id is set
+    # and the plan loaded successfully.
+    assert orchestrator.seen_has_source_plan == [False]
+    # pnl_pct is -75% -> worst band. The mismatched plan maths gave r =
+    # -3.15/294.25 = -0.011, which sits in the >= -1 band and scored a 3.
+    assert response.json()["execution_score"] == 1
+
+
+# --------------------------------------------------------------------------
+# Fix 13 — a repeat review must not buy a second OpenAI completion
+# --------------------------------------------------------------------------
+
+
+def test_review_is_cached_unless_force_is_passed(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJFORCE{suffix}"
+    user_id = f"force-user-{suffix}"
+    orchestrator = _CountingOrchestrator("First pass.")
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        trade = _create_trade(client, user_id, ticker)
+        client.put(
+            f"/api/v1/trades/{trade['id']}?user_id={user_id}",
+            json={
+                "exit_price": 120.0,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                "pnl": 2000.0,
+            },
+        )
+        app.state.services.llm = orchestrator
+
+        first = client.post(f"/api/v1/trades/{trade['id']}/review?user_id={user_id}")
+        assert first.status_code == 200
+        assert first.json()["ai_feedback"] == "First pass."
+        assert orchestrator.calls == 1
+
+        # An accidental duplicate POST (double-click, naive retry) replays
+        # the stored review without spending a second completion.
+        orchestrator.feedback = "Second pass."
+        cached = client.post(f"/api/v1/trades/{trade['id']}/review?user_id={user_id}")
+        assert cached.status_code == 200
+        assert cached.json()["ai_feedback"] == "First pass."
+        assert orchestrator.calls == 1
+
+        # The deliberate 「重新分析」 button does get a fresh one, and it
+        # overwrites what was stored.
+        forced = client.post(
+            f"/api/v1/trades/{trade['id']}/review?user_id={user_id}&force=true"
+        )
+        assert forced.status_code == 200
+        assert forced.json()["ai_feedback"] == "Second pass."
+        assert orchestrator.calls == 2
+
+        stored = client.get(f"/api/v1/trades/{trade['id']}/review?user_id={user_id}")
+    assert stored.json()["ai_feedback"] == "Second pass."
+
+
+def test_cached_review_still_enforces_ownership_and_closed_status(
+    monkeypatch,
+) -> None:
+    """The short-circuit sits behind the 404/403/400 checks, not in front."""
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"TJFORCE{suffix}"
+    user_id = f"force-user-{suffix}"
+    orchestrator = _CountingOrchestrator()
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker)
+        trade = _create_trade(client, user_id, ticker)
+        client.put(
+            f"/api/v1/trades/{trade['id']}?user_id={user_id}",
+            json={
+                "exit_price": 120.0,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                "pnl": 2000.0,
+            },
+        )
+        app.state.services.llm = orchestrator
+        client.post(f"/api/v1/trades/{trade['id']}/review?user_id={user_id}")
+
+        response = client.post(
+            f"/api/v1/trades/{trade['id']}/review?user_id=someone-else"
+        )
+    assert response.status_code == 403

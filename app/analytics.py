@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 HIGH_RISK_WARNING = "High risk/high volatility; accelerated theta decay."
+IMMINENT_EXPIRY_WARNING = (
+    "0-1 DTE: expiry-day gamma and theta risk regardless of dealer positioning."
+)
+
+# A contract expiring today or tomorrow carries expiry risk that has nothing
+# to do with which side of gamma dealers are on: theta is at its steepest,
+# the position's delta whipsaws around the strike, and there is no time left
+# for a thesis to play out. The old single `dte < 7 and NEG_GAMMA` rule let a
+# 0DTE naked long option in a positive-gamma regime through with no warning
+# at all, which then cleared theta_warning on the resulting plan card.
+IMMINENT_EXPIRY_DTE = 1
+SHORT_DATED_DTE = 7
 
 # US listed options expire on a US market date at the 4:00 PM ET close, so
 # every "what date is it for expiry-counting purposes" question has to be
@@ -104,14 +116,32 @@ def parse_gex_risk_profile(
     days_to_expiration: int,
 ) -> RiskProfile:
     is_negative = summary.gex_status == GEXStatus.NEG_GAMMA
-    locked = days_to_expiration < 7 and is_negative
+    # Independent OR-ed triggers, not one AND-ed condition: imminent expiry
+    # is dangerous on its own, and short-dated negative gamma is dangerous on
+    # its own. Each emits its own warning string so the reason for the lock
+    # is never ambiguous.
+    #
+    # iv_rank is deliberately NOT a trigger here yet. Its underlying
+    # calculation has a known correctness issue being fixed separately, and
+    # thresholding a currently-untrustworthy number inside a safety-critical
+    # lock would manufacture false confidence in both directions (spurious
+    # locks, and worse, spurious non-locks). Revisit once iv_rank is
+    # trustworthy.
+    imminent_expiry = days_to_expiration <= IMMINENT_EXPIRY_DTE
+    short_dated_negative_gamma = days_to_expiration < SHORT_DATED_DTE and is_negative
+    warnings = []
+    if imminent_expiry:
+        warnings.append(IMMINENT_EXPIRY_WARNING)
+    if short_dated_negative_gamma:
+        warnings.append(HIGH_RISK_WARNING)
+    locked = imminent_expiry or short_dated_negative_gamma
     return RiskProfile(
         gex_status=summary.gex_status,
         volatility_regime=(
             "HIGH_VOL_TRENDING" if is_negative else "LOW_VOL_MEAN_REVERSION"
         ),
         risk_level="HIGH" if locked else "NORMAL",
-        warnings=[HIGH_RISK_WARNING] if locked else [],
+        warnings=warnings,
         locked_warning=locked,
     )
 

@@ -348,12 +348,17 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
     }
   }
 
-  async function triggerReview(tradeId) {
+  // `force` re-runs the (paid) AI analysis. The first-time trigger leaves it
+  // off so a double-click or a retry after a network hiccup replays the
+  // stored review instead of buying a second completion; only the explicit
+  // 「重新分析」 button asks for a genuinely fresh one.
+  async function triggerReview(tradeId, force = false) {
     setReviewingId(tradeId);
     setError(null);
     try {
       const res = await fetch(
-        `${BASE_URL}/api/v1/trades/${tradeId}/review?user_id=${userId}`,
+        `${BASE_URL}/api/v1/trades/${tradeId}/review?user_id=${userId}` +
+          (force ? "&force=true" : ""),
         { method: "POST" }
       );
       if (!res.ok) throw new Error(await parseErrorDetail(res));
@@ -738,7 +743,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, onClose }) {
                       </ul>
                       <button
                         type="button"
-                        onClick={() => triggerReview(t.id)}
+                        onClick={() => triggerReview(t.id, true)}
                         disabled={reviewingId === t.id}
                         className="self-start text-[10px] text-[#57575c] hover:text-[#c9a15c] disabled:opacity-50 transition-colors"
                       >
