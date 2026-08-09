@@ -192,6 +192,29 @@ def test_system_prompt_forbids_reusing_stale_numbers_from_earlier_turns() -> Non
     assert "Never repeat, reuse, or extrapolate a number from your own" in prompt
 
 
+def test_system_prompt_requires_mechanical_dealer_hedging_scenario_not_intent() -> None:
+    """User asked for a sharp scenario read of dealer hedging behavior into
+    expiration (mean-reverting under POS_GAMMA, momentum-amplifying under
+    NEG_GAMMA), grounded strictly in Net GEX sign — not the market-maker
+    "intent to liquidate a trader group" narrative that was explicitly
+    declined as unfounded speculation dressed up as analysis.
+    """
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    risk = RiskProfile(
+        gex_status=GEXStatus.NEG_GAMMA,
+        volatility_regime="HIGH_VOL_TRENDING",
+        risk_level="HIGH",
+        warnings=["High risk/high volatility; accelerated theta decay."],
+        locked_warning=True,
+    )
+    prompt = orchestrator._instructions(gex_summary(), risk, 5)
+    assert "dealer hedging dynamics into expiration" in prompt
+    assert "mean-reverting" in prompt
+    assert "momentum-amplifying" in prompt
+    assert "never in claims" in prompt
+    assert "not a prediction of market maker motive" in prompt
+
+
 @pytest.mark.asyncio
 async def test_selected_put_forces_tool_and_builds_card() -> None:
     class FakeResponses:
