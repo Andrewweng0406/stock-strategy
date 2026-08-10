@@ -48,6 +48,8 @@ def _create_trade(client: TestClient, user_id: str, ticker: str) -> dict:
             "entry_price": 100.0,
             "position_size": 1,
             "expiration_date": "2099-08-14",
+            "option_type": "CALL",
+            "strike_price": 100.0,
             "days_to_expiration": 30,
         },
     )
@@ -66,6 +68,9 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
     assert trade["direction"] == "LONG"
     assert trade["credit_debit"] == "DEBIT"
     assert trade["expiration_date"] == "2099-08-14"
+    assert trade["option_type"] == "CALL"
+    assert trade["strike_price"] == 100.0
+    assert trade["legs"] == []
 
 
 def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -> None:
@@ -80,6 +85,25 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
                 "direction": "NEUTRAL",
                 "credit_debit": "CREDIT",
                 "expiration_date": "2099-08-21",
+                "option_type": "MULTI_LEG",
+                "legs": [
+                    {
+                        "side": "BUY",
+                        "option_type": "CALL",
+                        "strike_price": 100.0,
+                        "expiration_date": "2099-08-21",
+                        "quantity": 1,
+                        "price": 1.25,
+                    },
+                    {
+                        "side": "SELL",
+                        "option_type": "CALL",
+                        "strike_price": 105.0,
+                        "expiration_date": "2099-08-21",
+                        "quantity": 2,
+                        "price": 0.65,
+                    },
+                ],
                 "entry_price": 1.25,
                 "position_size": 2,
                 "days_to_expiration": 30,
@@ -90,6 +114,27 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
     assert trade["direction"] == "NEUTRAL"
     assert trade["credit_debit"] == "CREDIT"
     assert trade["expiration_date"] == "2099-08-21"
+    assert trade["option_type"] == "MULTI_LEG"
+    assert len(trade["legs"]) == 2
+
+
+def test_create_trade_requires_strike_for_single_leg(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTNOSTRIKE")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-no-strike",
+                "ticker": "TJTESTNOSTRIKE",
+                "strategy_type": "Long Put",
+                "expiration_date": "2099-08-21",
+                "option_type": "PUT",
+                "entry_price": 1.25,
+                "position_size": 2,
+                "days_to_expiration": 30,
+            },
+        )
+    assert response.status_code == 422
 
 
 def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
@@ -103,6 +148,8 @@ def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
                 "strategy_type": "Long Call",
                 "entry_date": "2099-08-15T14:30:00Z",
                 "expiration_date": "2099-08-14",
+                "option_type": "CALL",
+                "strike_price": 100.0,
                 "entry_price": 1.25,
                 "position_size": 2,
                 "days_to_expiration": 30,
@@ -362,6 +409,8 @@ def _create_trade_with_plan(
             "strategy_type": "Long Call",
             "source_plan_id": plan_id,
             "expiration_date": "2099-08-14",
+            "option_type": "CALL",
+            "strike_price": 100.0,
             "entry_price": entry_price,
             "position_size": 1,
             "days_to_expiration": 30,

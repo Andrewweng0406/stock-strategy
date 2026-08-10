@@ -32,6 +32,8 @@ from app.models import (
     TradeCreate,
     TradeCreditDebit,
     TradeDirection,
+    TradeLeg,
+    TradeOptionType,
     TradeReview,
     TradeStatus,
     UserProfile,
@@ -586,6 +588,10 @@ class TradeRecord(Base):
         String(16), default=TradeCreditDebit.DEBIT.value
     )
     expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    option_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    strike_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    contract_symbol: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    legs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_plan_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     entry_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     exit_date: Mapped[datetime | None] = mapped_column(
@@ -652,6 +658,26 @@ def ensure_trade_metadata_columns(connection) -> None:
             f"ALTER TABLE {table} ADD COLUMN expiration_date DATE"
         )
         added_column = True
+    if "option_type" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN option_type VARCHAR(16)"
+        )
+        added_column = True
+    if "strike_price" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN strike_price FLOAT"
+        )
+        added_column = True
+    if "contract_symbol" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN contract_symbol VARCHAR(128)"
+        )
+        added_column = True
+    if "legs_json" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN legs_json TEXT"
+        )
+        added_column = True
     if not added_column:
         return
     if not added_direction_or_credit:
@@ -708,6 +734,17 @@ class TradeRepository:
             direction=create.direction.value,
             credit_debit=create.credit_debit.value,
             expiration_date=create.expiration_date,
+            option_type=create.option_type.value,
+            strike_price=create.strike_price,
+            contract_symbol=create.contract_symbol,
+            legs_json=(
+                json.dumps(
+                    [leg.model_dump(mode="json") for leg in create.legs],
+                    separators=(",", ":"),
+                )
+                if create.legs
+                else None
+            ),
             source_plan_id=(
                 str(create.source_plan_id) if create.source_plan_id else None
             ),
@@ -771,6 +808,14 @@ class TradeRepository:
 
     @staticmethod
     def _to_model(record: TradeRecord) -> Trade:
+        legs: list[TradeLeg] = []
+        if record.legs_json:
+            try:
+                raw_legs = json.loads(record.legs_json)
+                if isinstance(raw_legs, list):
+                    legs = [TradeLeg.model_validate(leg) for leg in raw_legs]
+            except (TypeError, ValueError):
+                logger.warning("Invalid trade legs JSON on trade %s", record.id)
         return Trade(
             id=record.id,
             user_id=record.user_id,
@@ -779,6 +824,10 @@ class TradeRepository:
             direction=TradeDirection(record.direction),
             credit_debit=TradeCreditDebit(record.credit_debit),
             expiration_date=record.expiration_date,
+            option_type=TradeOptionType(record.option_type) if record.option_type else None,
+            strike_price=record.strike_price,
+            contract_symbol=record.contract_symbol,
+            legs=legs,
             source_plan_id=record.source_plan_id,
             entry_date=_as_utc(record.entry_date),
             exit_date=_as_utc(record.exit_date),

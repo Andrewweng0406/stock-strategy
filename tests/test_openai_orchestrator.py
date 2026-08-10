@@ -16,6 +16,7 @@ from app.models import (
     Trade,
     TradeCreditDebit,
     TradeDirection,
+    TradeOptionType,
     TradeStatus,
     UserProfile,
 )
@@ -318,6 +319,9 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
         direction=TradeDirection.SHORT,
         credit_debit=TradeCreditDebit.CREDIT,
         expiration_date=date(2099, 8, 14),
+        option_type=TradeOptionType.CALL,
+        strike_price=100.0,
+        contract_symbol="AAPL990814C00100000",
         source_plan_id=uuid4(),
         entry_date=datetime.now(timezone.utc),
         exit_date=datetime.now(timezone.utc),
@@ -355,6 +359,9 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
     assert '"direction": "SHORT"' in fake_responses.request["instructions"]
     assert '"credit_debit": "CREDIT"' in fake_responses.request["instructions"]
     assert '"expiration_date": "2099-08-14"' in fake_responses.request["instructions"]
+    assert '"option_type": "CALL"' in fake_responses.request["instructions"]
+    assert '"strike_price": 100.0' in fake_responses.request["instructions"]
+    assert '"contract_symbol": "AAPL990814C00100000"' in fake_responses.request["instructions"]
     assert ai_feedback == "Exit respected the plan."
     assert key_takeaways == ["Booked profit near target", "Stuck to the stop"]
 

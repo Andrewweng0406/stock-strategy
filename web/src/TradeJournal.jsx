@@ -29,6 +29,12 @@ const CREDIT_DEBIT_TYPES = [
   { value: "CREDIT", label: "Credit" },
 ];
 
+const OPTION_TYPES = [
+  { value: "CALL", label: "Call" },
+  { value: "PUT", label: "Put" },
+  { value: "MULTI_LEG", label: "Multi-leg" },
+];
+
 // One options contract controls 100 shares. The backend uses the same
 // multiplier when it derives pnl_pct (pnl / (entry_price * 100 * size) * 100),
 // so the close form's derived figures have to match it exactly.
@@ -90,12 +96,25 @@ function inferCreditDebit(strategyType) {
   return isCreditStrategy(strategyType) ? "CREDIT" : "DEBIT";
 }
 
+function inferOptionType(strategyType) {
+  const text = String(strategyType || "").toLowerCase();
+  if (/(spread|condor|butterfly|calendar|straddle|strangle|ratio)/i.test(text)) {
+    return "MULTI_LEG";
+  }
+  if (/\bput\b/i.test(text)) return "PUT";
+  return "CALL";
+}
+
 function directionLabel(value) {
   return TRADE_DIRECTIONS.find((option) => option.value === value)?.label || value || "—";
 }
 
 function creditDebitLabel(value) {
   return CREDIT_DEBIT_TYPES.find((option) => option.value === value)?.label || value || "—";
+}
+
+function optionTypeLabel(value) {
+  return OPTION_TYPES.find((option) => option.value === value)?.label || value || "—";
 }
 
 /**
@@ -155,6 +174,16 @@ function fmtExpirationDate(iso) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+function contractSummary(trade) {
+  if (trade.option_type === "MULTI_LEG") {
+    const count = Array.isArray(trade.legs) ? trade.legs.length : 0;
+    return count ? `${count} legs` : "Multi-leg";
+  }
+  const strike = trade.strike_price ? `$${trade.strike_price}` : "—";
+  const type = optionTypeLabel(trade.option_type);
+  return `${strike} ${type}${trade.contract_symbol ? ` · ${trade.contract_symbol}` : ""}`;
+}
+
 export default function TradeJournalPanel({ userId, ticker, dte, expirationDate, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
@@ -170,6 +199,10 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     direction: "LONG",
     creditDebit: "DEBIT",
     expirationDate: expirationDate || "",
+    optionType: "CALL",
+    strikePrice: "",
+    contractSymbol: "",
+    legsText: "",
     entryPrice: "",
     positionSize: "1",
     entryDate: defaultLocalDateTimeInput(),
@@ -299,12 +332,27 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     const entryPrice = parsePositiveNumber(draft.entryPrice);
     const positionSize = parsePositiveInt(draft.positionSize);
     const tradeExpirationDate = draft.expirationDate.trim() || null;
+    const strikePrice = parsePositiveNumber(draft.strikePrice);
+    let legs = [];
+    if (draft.optionType === "MULTI_LEG") {
+      try {
+        const parsed = draft.legsText.trim() ? JSON.parse(draft.legsText) : [];
+        legs = Array.isArray(parsed) ? parsed : null;
+      } catch {
+        legs = null;
+      }
+    }
 
     // These used to be a silent `return` — the button simply did nothing.
     let validation = null;
     if (!tickerValue) validation = "請輸入股票代號";
     else if (!strategyValue) validation = "請輸入策略類型";
     else if (!tradeExpirationDate) validation = "請選擇到期日";
+    else if (!draft.optionType) validation = "請選擇 Call/Put 或 Multi-leg";
+    else if (draft.optionType !== "MULTI_LEG" && strikePrice === null)
+      validation = "履約價必須是大於 0 的數字";
+    else if (draft.optionType === "MULTI_LEG" && (!legs || legs.length < 2))
+      validation = "Multi-leg 請輸入至少兩腿 JSON";
     else if (entryPrice === null) validation = "進場價必須是大於 0 的數字";
     else if (positionSize === null) validation = "口數必須是大於 0 的整數";
     else if (draft.entryDate && new Date(draft.entryDate).getTime() > Date.now() + 60_000)
@@ -328,6 +376,10 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
           direction: draft.direction,
           credit_debit: draft.creditDebit,
           expiration_date: tradeExpirationDate,
+          option_type: draft.optionType,
+          strike_price: draft.optionType === "MULTI_LEG" ? null : strikePrice,
+          contract_symbol: draft.contractSymbol.trim() || null,
+          legs: draft.optionType === "MULTI_LEG" ? legs : [],
           entry_price: entryPrice,
           position_size: positionSize,
           entry_date: draft.entryDate
@@ -352,6 +404,10 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
         direction: "LONG",
         creditDebit: "DEBIT",
         expirationDate: expirationDate || "",
+        optionType: "CALL",
+        strikePrice: "",
+        contractSymbol: "",
+        legsText: "",
         entryPrice: "",
         positionSize: "1",
         entryDate: defaultLocalDateTimeInput(),
@@ -439,6 +495,8 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     !draft.ticker.trim() ||
     !draft.strategyType.trim() ||
     !draft.expirationDate.trim() ||
+    (draft.optionType !== "MULTI_LEG" && !draft.strikePrice.trim()) ||
+    (draft.optionType === "MULTI_LEG" && !draft.legsText.trim()) ||
     !draft.entryPrice.trim() ||
     !draft.positionSize.trim();
   const closeDisabled = !closeDraft.exitPrice.trim() || !closeDraft.pnl.trim();
@@ -522,6 +580,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
                   strategyType,
                   direction: inferDirection(strategyType),
                   creditDebit: inferCreditDebit(strategyType),
+                  optionType: inferOptionType(strategyType),
                 });
               }}
               placeholder="策略類型（可挑選或自行輸入）"
@@ -570,6 +629,57 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
           </div>
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+            <select
+              value={draft.optionType}
+              onChange={(e) =>
+                updateDraft({
+                  optionType: e.target.value,
+                  strikePrice: e.target.value === "MULTI_LEG" ? "" : draft.strikePrice,
+                })
+              }
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            >
+              {OPTION_TYPES.map((option) => (
+                <option key={option.value} value={option.value}>
+                  合約 · {option.label}
+                </option>
+              ))}
+            </select>
+            {draft.optionType === "MULTI_LEG" ? (
+              <input
+                value={draft.contractSymbol}
+                onChange={(e) => updateDraft({ contractSymbol: e.target.value })}
+                placeholder="組合代碼（選填）"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+            ) : (
+              <input
+                value={draft.strikePrice}
+                onChange={(e) => updateDraft({ strikePrice: e.target.value })}
+                placeholder="履約價"
+                inputMode="decimal"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+            )}
+          </div>
+          {draft.optionType !== "MULTI_LEG" && (
+            <input
+              value={draft.contractSymbol}
+              onChange={(e) => updateDraft({ contractSymbol: e.target.value })}
+              placeholder="合約代碼（選填）"
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            />
+          )}
+          {draft.optionType === "MULTI_LEG" && (
+            <textarea
+              value={draft.legsText}
+              onChange={(e) => updateDraft({ legsText: e.target.value })}
+              placeholder='腿資料 JSON，例如 [{"side":"BUY","option_type":"CALL","strike_price":100,"expiration_date":"2099-08-14","quantity":1,"price":2.5}]'
+              rows={3}
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] resize-none ${MONO}`}
+            />
+          )}
           <div className="flex gap-2">
             <input
               value={draft.entryPrice}
@@ -653,7 +763,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
             type="button"
             onClick={createTrade}
             disabled={creating || createDisabled}
-            title={createDisabled ? "請先填寫代號、策略類型、到期日、進場價與口數" : undefined}
+            title={createDisabled ? "請先填寫代號、策略類型、到期日、合約資訊、進場價與口數" : undefined}
             className="flex items-center justify-center gap-1.5 py-2 rounded-md bg-[#c9a15c] text-[#1a1408] text-[11.5px] font-bold uppercase tracking-wide hover:bg-[#d8b06c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <Plus size={13} />
@@ -693,7 +803,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
                   {CONTRACT_MULTIPLIER} = {fmtDollar(t.entry_price * CONTRACT_MULTIPLIER * t.position_size)}
                 </div>
                 <div className="text-[9.5px] text-[#57575c] mb-2">
-                  到期 {fmtExpirationDate(t.expiration_date)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                  到期 {fmtExpirationDate(t.expiration_date)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                 </div>
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
@@ -835,7 +945,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
                     {fmtDollar(t.pnl)}
                   </div>
                   <div className="text-[9.5px] text-[#57575c] mb-2">
-                    到期 {fmtExpirationDate(t.expiration_date)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                    到期 {fmtExpirationDate(t.expiration_date)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                   </div>
 
                   {review ? (

@@ -225,6 +225,8 @@ async def test_trade_repository_create_defaults_to_open() -> None:
             ticker="aapl",
             strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL",
+            strike_price=100.0,
             entry_price=100.0,
             position_size=1,
             days_to_expiration=30,
@@ -246,6 +248,7 @@ async def test_trade_repository_create_defaults_entry_date_to_now() -> None:
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -262,6 +265,7 @@ async def test_trade_repository_create_honors_explicit_entry_date() -> None:
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
             entry_date=backdated,
         ),
@@ -281,6 +285,25 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
             direction=TradeDirection.NEUTRAL,
             credit_debit=TradeCreditDebit.CREDIT,
             expiration_date=date(2099, 8, 14),
+            option_type="MULTI_LEG",
+            legs=[
+                {
+                    "side": "BUY",
+                    "option_type": "CALL",
+                    "strike_price": 100.0,
+                    "expiration_date": date(2099, 8, 14),
+                    "quantity": 1,
+                    "price": 2.0,
+                },
+                {
+                    "side": "SELL",
+                    "option_type": "CALL",
+                    "strike_price": 105.0,
+                    "expiration_date": date(2099, 8, 14),
+                    "quantity": 2,
+                    "price": 1.0,
+                },
+            ],
             entry_price=100.0,
             position_size=1,
             days_to_expiration=30,
@@ -299,6 +322,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -307,6 +331,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
         TradeCreate(
             user_id="user-1", ticker="TSLA", strategy_type="Long Put",
             expiration_date=date(2099, 8, 21),
+            option_type="PUT", strike_price=200.0,
             entry_price=200.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -329,6 +354,7 @@ async def test_trade_repository_close_trade_computes_pnl_pct() -> None:
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -364,6 +390,7 @@ async def test_trade_repository_close_trade_raises_permission_error_for_other_us
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -383,6 +410,7 @@ async def test_trade_repository_close_trade_raises_value_error_when_already_clos
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -477,6 +505,10 @@ def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() ->
         assert columns["direction"]["nullable"] is False
         assert columns["credit_debit"]["nullable"] is False
         assert columns["expiration_date"]["nullable"] is True
+        assert columns["option_type"]["nullable"] is True
+        assert columns["strike_price"]["nullable"] is True
+        assert columns["contract_symbol"]["nullable"] is True
+        assert columns["legs_json"]["nullable"] is True
         rows = connection.exec_driver_sql(
             "SELECT id, direction, credit_debit, expiration_date FROM trades ORDER BY id"
         ).all()

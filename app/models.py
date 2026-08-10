@@ -212,6 +212,27 @@ class TradeCreditDebit(str, Enum):
     CREDIT = "CREDIT"
 
 
+class TradeOptionType(str, Enum):
+    CALL = "CALL"
+    PUT = "PUT"
+    MULTI_LEG = "MULTI_LEG"
+
+
+class TradeLegSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class TradeLeg(StrictModel):
+    side: TradeLegSide
+    option_type: TradeOptionType
+    strike_price: float = Field(gt=0)
+    expiration_date: date
+    quantity: int = Field(gt=0)
+    price: float | None = Field(default=None, gt=0)
+    contract_symbol: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class Trade(StrictModel):
     id: UUID
     user_id: str = Field(min_length=1, max_length=128)
@@ -220,6 +241,10 @@ class Trade(StrictModel):
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
     expiration_date: date | None = None
+    option_type: TradeOptionType | None = None
+    strike_price: float | None = Field(default=None, gt=0)
+    contract_symbol: str | None = Field(default=None, min_length=1, max_length=128)
+    legs: list[TradeLeg] = Field(default_factory=list, max_length=12)
     source_plan_id: UUID | None = None
     entry_date: datetime
     exit_date: datetime | None = None
@@ -243,6 +268,10 @@ class TradeCreate(StrictModel):
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
     expiration_date: date
+    option_type: TradeOptionType
+    strike_price: float | None = Field(default=None, gt=0)
+    contract_symbol: str | None = Field(default=None, min_length=1, max_length=128)
+    legs: list[TradeLeg] = Field(default_factory=list, max_length=12)
     source_plan_id: UUID | None = None
     entry_date: datetime | None = None
     entry_price: float = Field(gt=0)
@@ -255,6 +284,26 @@ class TradeCreate(StrictModel):
         entry_date = self.entry_date or datetime.now(timezone.utc)
         if self.expiration_date < entry_date.date():
             raise ValueError("expiration_date cannot be before entry_date")
+        return self
+
+    @model_validator(mode="after")
+    def contract_identity_is_complete(self) -> "TradeCreate":
+        if self.option_type in (TradeOptionType.CALL, TradeOptionType.PUT):
+            if self.strike_price is None:
+                raise ValueError("strike_price is required for single-leg trades")
+            if self.legs:
+                raise ValueError("legs must be empty for single-leg trades")
+            return self
+        if len(self.legs) < 2:
+            raise ValueError("multi-leg trades require at least two legs")
+        earliest_leg_expiration = min(leg.expiration_date for leg in self.legs)
+        if self.expiration_date != earliest_leg_expiration:
+            raise ValueError(
+                "top-level expiration_date must be the earliest leg expiration"
+            )
+        for leg in self.legs:
+            if leg.option_type == TradeOptionType.MULTI_LEG:
+                raise ValueError("leg option_type must be CALL or PUT")
         return self
 
 

@@ -528,6 +528,10 @@ precise, probability-aware advice from the authoritative market context below.
                 "expiration_date": trade.expiration_date.isoformat()
                 if trade.expiration_date
                 else None,
+                "option_type": trade.option_type.value if trade.option_type else None,
+                "strike_price": trade.strike_price,
+                "contract_symbol": trade.contract_symbol,
+                "legs": [leg.model_dump(mode="json") for leg in trade.legs],
                 "entry_price": trade.entry_price,
                 "exit_price": trade.exit_price,
                 "position_size": trade.position_size,
