@@ -1045,7 +1045,6 @@ export default function TradingTerminalNotebook() {
             <TradeJournalPanel
               userId={userId}
               ticker={ticker}
-              dte={resolvedDte}
               expirationDate={aggregateMode ? null : selectedExpiration?.date ?? null}
               onClose={() => setShowJournal(false)}
             />

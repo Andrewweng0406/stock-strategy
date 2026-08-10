@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.analytics import GEXCalculator, parse_gex_risk_profile
+from app.analytics import GEXCalculator, market_today, parse_gex_risk_profile
 from app.cache import ResilientCache
 from app.config import settings
 from app.database import (
@@ -479,13 +479,24 @@ async def create_trade(payload: TradeCreate, services: Services) -> Trade:
         # it would push users into recording no plan at all. A ticker
         # mismatch, by contrast, is unambiguously wrong: those levels can
         # never describe this trade.
+    # expiration_date is the only DTE source of truth now — a separate
+    # client-supplied days_to_expiration used to let the entry snapshot
+    # silently drift from the expiration the trade actually records (e.g.
+    # aggregate mode, or a user editing the expiration after the terminal's
+    # DTE had already been captured). Clamped to the snapshot endpoint's
+    # existing [0, 730] range; a trade logged well after the fact can carry
+    # an expiration_date already in the past, which floors to 0 rather than
+    # going negative.
+    days_to_expiration = max(
+        0, min(730, (payload.expiration_date - market_today()).days)
+    )
     summary = await services.gex_service.get_summary(
-        payload.ticker, payload.days_to_expiration
+        payload.ticker, days_to_expiration
     )
     entry_gex_snapshot_id = None
     if services.market_data.active_mode != "mock":
         entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
-            payload.ticker.strip().upper(), payload.days_to_expiration, summary
+            payload.ticker.strip().upper(), days_to_expiration, summary
         )
     return await services.trade_repository.create_trade(
         payload, entry_gex_snapshot_id

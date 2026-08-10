@@ -1,16 +1,27 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.analytics import market_today
 from app.config import settings
 from app.main import app
 
 
-def _summary_payload(ticker: str) -> dict:
+def _default_expiration_date(offset_days: int = 30) -> str:
+    """expiration_date drives the server's own DTE computation now (no more
+    client-supplied days_to_expiration), so the date used here has to land
+    the same `offset_days` out from market_today() that _seed_cache's default
+    dte pre-warms the GEX cache under — otherwise create_trade computes a
+    different DTE than what's cached and falls through to a live/mock fetch.
+    """
+    return (market_today() + timedelta(days=offset_days)).isoformat()
+
+
+def _summary_payload(ticker: str, stock_price: float = 100.0) -> dict:
     return {
         "ticker": ticker,
-        "stock_price": 100.0,
+        "stock_price": stock_price,
         "zero_gamma": 95.0,
         "call_wall": 110.0,
         "put_wall": 90.0,
@@ -20,7 +31,13 @@ def _summary_payload(ticker: str) -> dict:
     }
 
 
-def _seed_cache(client: TestClient, monkeypatch, ticker: str, dte: int = 30) -> None:
+def _seed_cache(
+    client: TestClient,
+    monkeypatch,
+    ticker: str,
+    dte: int = 30,
+    stock_price: float = 100.0,
+) -> None:
     """Pre-warms the GEX cache via the sync endpoint so a trade's entry-
     snapshot fetch hits the cache instead of a live market-data call — same
     technique tests/test_sync_endpoints.py already uses.
@@ -31,7 +48,7 @@ def _seed_cache(client: TestClient, monkeypatch, ticker: str, dte: int = 30) -> 
         json={
             "ticker": ticker,
             "days_to_expiration": dte,
-            "summary": _summary_payload(ticker),
+            "summary": _summary_payload(ticker, stock_price=stock_price),
         },
         headers={"X-Sync-Token": "test-sync-token"},
     )
@@ -47,10 +64,9 @@ def _create_trade(client: TestClient, user_id: str, ticker: str) -> dict:
             "strategy_type": "Long Call",
             "entry_price": 100.0,
             "position_size": 1,
-            "expiration_date": "2099-08-14",
+            "expiration_date": _default_expiration_date(),
             "option_type": "CALL",
             "strike_price": 100.0,
-            "days_to_expiration": 30,
         },
     )
     assert response.status_code == 200
@@ -67,7 +83,7 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
     assert trade["pnl_pct"] is None
     assert trade["direction"] == "LONG"
     assert trade["credit_debit"] == "DEBIT"
-    assert trade["expiration_date"] == "2099-08-14"
+    assert trade["expiration_date"] == _default_expiration_date()
     assert trade["option_type"] == "CALL"
     assert trade["strike_price"] == 100.0
     assert trade["legs"] == []
@@ -84,14 +100,14 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
                 "strategy_type": "Ratio Spread",
                 "direction": "NEUTRAL",
                 "credit_debit": "CREDIT",
-                "expiration_date": "2099-08-21",
+                "expiration_date": _default_expiration_date(),
                 "option_type": "MULTI_LEG",
                 "legs": [
                     {
                         "side": "BUY",
                         "option_type": "CALL",
                         "strike_price": 100.0,
-                        "expiration_date": "2099-08-21",
+                        "expiration_date": _default_expiration_date(),
                         "quantity": 1,
                         "price": 1.25,
                     },
@@ -99,21 +115,20 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
                         "side": "SELL",
                         "option_type": "CALL",
                         "strike_price": 105.0,
-                        "expiration_date": "2099-08-21",
+                        "expiration_date": _default_expiration_date(),
                         "quantity": 2,
                         "price": 0.65,
                     },
                 ],
                 "entry_price": 1.25,
                 "position_size": 2,
-                "days_to_expiration": 30,
             },
         )
     assert response.status_code == 200
     trade = response.json()
     assert trade["direction"] == "NEUTRAL"
     assert trade["credit_debit"] == "CREDIT"
-    assert trade["expiration_date"] == "2099-08-21"
+    assert trade["expiration_date"] == _default_expiration_date()
     assert trade["option_type"] == "MULTI_LEG"
     assert len(trade["legs"]) == 2
 
@@ -131,7 +146,6 @@ def test_create_trade_requires_strike_for_single_leg(monkeypatch) -> None:
                 "option_type": "PUT",
                 "entry_price": 1.25,
                 "position_size": 2,
-                "days_to_expiration": 30,
             },
         )
     assert response.status_code == 422
@@ -152,7 +166,6 @@ def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
                 "strike_price": 100.0,
                 "entry_price": 1.25,
                 "position_size": 2,
-                "days_to_expiration": 30,
             },
         )
     assert response.status_code == 422
@@ -169,10 +182,42 @@ def test_create_trade_requires_expiration_date(monkeypatch) -> None:
                 "strategy_type": "Long Call",
                 "entry_price": 1.25,
                 "position_size": 2,
-                "days_to_expiration": 30,
             },
         )
     assert response.status_code == 422
+
+
+def test_create_trade_derives_snapshot_dte_from_expiration_date(monkeypatch) -> None:
+    """The entry GEX snapshot's DTE must come from expiration_date alone —
+    there is no separate days_to_expiration field to drift out of sync with
+    it anymore. Seed two distinct cached summaries (distinguishable by
+    stock_price) at two different DTEs, and confirm the trade's expiration
+    date picks the matching one.
+    """
+    ticker = "TJTESTDTE"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker, dte=10, stock_price=111.0)
+        _seed_cache(client, monkeypatch, ticker, dte=60, stock_price=222.0)
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-dte",
+                "ticker": ticker,
+                "strategy_type": "Long Call",
+                "entry_price": 1.25,
+                "position_size": 1,
+                "expiration_date": _default_expiration_date(offset_days=10),
+                "option_type": "CALL",
+                "strike_price": 100.0,
+            },
+        )
+        assert response.status_code == 200
+        history = client.get(f"/api/v1/gex/{ticker}/history?limit=5")
+    assert history.status_code == 200
+    snapshots = history.json()["snapshots"]
+    matching = [s for s in snapshots if s["days_to_expiration"] == 10]
+    assert matching, f"no 10-DTE snapshot recorded: {snapshots}"
+    assert matching[0]["underlying_price"] == 111.0
 
 
 def test_list_trades_filters_by_ticker_and_status(monkeypatch) -> None:
@@ -408,12 +453,11 @@ def _create_trade_with_plan(
             "ticker": ticker,
             "strategy_type": "Long Call",
             "source_plan_id": plan_id,
-            "expiration_date": "2099-08-14",
+            "expiration_date": _default_expiration_date(),
             "option_type": "CALL",
             "strike_price": 100.0,
             "entry_price": entry_price,
             "position_size": 1,
-            "days_to_expiration": 30,
         },
     )
 

@@ -277,7 +277,6 @@ class TradeCreate(StrictModel):
     entry_price: float = Field(gt=0)
     position_size: int = Field(gt=0)
     notes: str | None = Field(default=None, max_length=2000)
-    days_to_expiration: int = Field(default=30, ge=0, le=730)
 
     @model_validator(mode="after")
     def expiration_cannot_precede_entry(self) -> "TradeCreate":

@@ -187,7 +187,7 @@ function contractSummary(trade) {
   return `${strike} ${type}${trade.contract_symbol ? ` · ${trade.contract_symbol}` : ""}`;
 }
 
-export default function TradeJournalPanel({ userId, ticker, dte, expirationDate, onClose }) {
+export default function TradeJournalPanel({ userId, ticker, expirationDate, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
   const [plansError, setPlansError] = useState(null);
@@ -303,17 +303,6 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     setDraft((d) => ({ ...d, expirationDate: expirationDate || "" }));
   }, [expirationDate]);
 
-  // `dte` is null when the terminal has no expiration resolved for the current
-  // ticker (mid-switch, or the expirations fetch failed). Number(null) is 0,
-  // so the null case has to be caught before it reaches Number.isFinite —
-  // otherwise the 30 fallback is dead code and trades silently get a 0DTE
-  // entry snapshot presented as real entry context.
-  const numericDte = dte === null || dte === undefined || dte === "" ? NaN : Number(dte);
-  const dteResolved = Number.isFinite(numericDte);
-  // Backend clamps days_to_expiration to 0..730.
-  const snapshotDte = dteResolved
-    ? Math.min(730, Math.max(0, Math.round(numericDte)))
-    : 30;
   // Recomputed each render so a panel left open overnight can't go stale.
   const maxEntryDate = defaultLocalDateTimeInput();
 
@@ -390,9 +379,10 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
             : null,
           notes: draft.notes.trim() || null,
           source_plan_id: draft.sourcePlanId || null,
-          // The DTE actually on screen — the entry GEX snapshot the backend
-          // captures is only meaningful if it matches what was being looked at.
-          days_to_expiration: snapshotDte,
+          // expiration_date alone drives the entry GEX snapshot's DTE now —
+          // the backend derives it, so the snapshot always matches the
+          // expiration actually being recorded, even if the user edited it
+          // away from whatever the terminal happened to be showing.
         }),
       });
       if (!res.ok) throw new Error(await parseErrorDetail(res));
@@ -748,20 +738,15 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
           <div className="text-[9px] text-[#57575c] leading-snug">
             {tickerOverridden ? (
               <>
-                代號 {draft.ticker}（手動輸入）· 到期 {fmtExpirationDate(effectiveExpirationDate)} · DTE {snapshotDte} 取自終端機目前的{" "}
-                {(ticker || "—").toUpperCase()}
+                代號 {draft.ticker}（手動輸入）· 將以到期日 {fmtExpirationDate(effectiveExpirationDate)} 擷取進場 GEX 快照（與終端機目前的{" "}
+                {(ticker || "—").toUpperCase()} 無關）
               </>
             ) : (
               <>
-                將以目前終端機的 {draft.ticker || "—"} · 到期 {fmtExpirationDate(effectiveExpirationDate)} · {snapshotDte} DTE 擷取進場 GEX 快照
+                將以到期日 {fmtExpirationDate(effectiveExpirationDate)} 擷取 {draft.ticker || "—"} 的進場 GEX 快照
               </>
             )}
           </div>
-          {!dteResolved && (
-            <div className="text-[9.5px] text-[#c9a15c] leading-snug">
-              ⚠ 終端機目前尚未載入到期日，將以預設 {snapshotDte} DTE 擷取快照，進場 GEX 參考價值有限。
-            </div>
-          )}
           <button
             type="button"
             onClick={createTrade}

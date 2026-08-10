@@ -229,7 +229,6 @@ async def test_trade_repository_create_defaults_to_open() -> None:
             strike_price=100.0,
             entry_price=100.0,
             position_size=1,
-            days_to_expiration=30,
         ),
         entry_gex_snapshot_id=42,
     )
@@ -249,7 +248,7 @@ async def test_trade_repository_create_defaults_entry_date_to_now() -> None:
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -266,7 +265,7 @@ async def test_trade_repository_create_honors_explicit_entry_date() -> None:
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
             entry_date=backdated,
         ),
         entry_gex_snapshot_id=None,
@@ -306,7 +305,6 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
             ],
             entry_price=100.0,
             position_size=1,
-            days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -323,7 +321,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -332,7 +330,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
             user_id="user-1", ticker="TSLA", strategy_type="Long Put",
             expiration_date=date(2099, 8, 21),
             option_type="PUT", strike_price=200.0,
-            entry_price=200.0, position_size=1, days_to_expiration=30,
+            entry_price=200.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -355,7 +353,7 @@ async def test_trade_repository_close_trade_computes_pnl_pct() -> None:
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -391,7 +389,7 @@ async def test_trade_repository_close_trade_raises_permission_error_for_other_us
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
@@ -411,7 +409,7 @@ async def test_trade_repository_close_trade_raises_value_error_when_already_clos
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
             expiration_date=date(2099, 8, 14),
             option_type="CALL", strike_price=100.0,
-            entry_price=100.0, position_size=1, days_to_expiration=30,
+            entry_price=100.0, position_size=1,
         ),
         entry_gex_snapshot_id=None,
     )
