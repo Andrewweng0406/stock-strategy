@@ -11,6 +11,8 @@ __pycache__/
 node_modules
 web/dist/
 web/.vite/
+web/playwright-report/
+web/test-results/
 
 # local tool settings
 .claude/settings.local.json

@@ -133,6 +133,40 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
     assert len(trade["legs"]) == 2
 
 
+def test_list_trades_preserves_contract_identity(monkeypatch) -> None:
+    user_id = f"user-contract-list-{uuid4()}"
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTLIST")
+        created = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": user_id,
+                "ticker": "TJTESTLIST",
+                "strategy_type": "Long Put",
+                "direction": "SHORT",
+                "credit_debit": "DEBIT",
+                "expiration_date": _default_expiration_date(),
+                "option_type": "PUT",
+                "strike_price": 95.0,
+                "contract_symbol": "TJTESTLIST260821P00095000",
+                "entry_price": 2.4,
+                "position_size": 1,
+            },
+        )
+        assert created.status_code == 200
+        response = client.get(f"/api/v1/trades?user_id={user_id}")
+    assert response.status_code == 200
+    trades = response.json()["trades"]
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade["expiration_date"] == _default_expiration_date()
+    assert trade["option_type"] == "PUT"
+    assert trade["strike_price"] == 95.0
+    assert trade["contract_symbol"] == "TJTESTLIST260821P00095000"
+    assert trade["direction"] == "SHORT"
+    assert trade["credit_debit"] == "DEBIT"
+
+
 def test_create_trade_requires_strike_for_single_leg(monkeypatch) -> None:
     with TestClient(app) as client:
         _seed_cache(client, monkeypatch, "TJTESTNOSTRIKE")

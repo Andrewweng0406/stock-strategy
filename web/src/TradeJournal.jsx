@@ -187,6 +187,10 @@ function contractSummary(trade) {
   return `${strike} ${type}${trade.contract_symbol ? ` · ${trade.contract_symbol}` : ""}`;
 }
 
+function tradeExpirationSummary(trade) {
+  return trade.expiration_date ? `到期 ${fmtExpirationDate(trade.expiration_date)}` : "到期未記錄";
+}
+
 function defaultLeg(expirationDate = "") {
   return {
     side: "BUY",
@@ -955,7 +959,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
                   {CONTRACT_MULTIPLIER} = {fmtDollar(t.entry_price * CONTRACT_MULTIPLIER * t.position_size)}
                 </div>
                 <div className="text-[9.5px] text-[#57575c] mb-2">
-                  到期 {fmtExpirationDate(t.expiration_date)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                  {tradeExpirationSummary(t)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                 </div>
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
@@ -1097,7 +1101,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
                     {fmtDollar(t.pnl)}
                   </div>
                   <div className="text-[9.5px] text-[#57575c] mb-2">
-                    到期 {fmtExpirationDate(t.expiration_date)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
+                    {tradeExpirationSummary(t)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                   </div>
 
                   {review ? (

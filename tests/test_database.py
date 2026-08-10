@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -33,12 +34,25 @@ from app.models import (
 )
 
 
+_ENGINES = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _dispose_async_engines():
+    try:
+        yield
+    finally:
+        while _ENGINES:
+            await _ENGINES.pop().dispose()
+
+
 async def _session_factory() -> async_sessionmaker[AsyncSession]:
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
+    _ENGINES.append(engine)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
