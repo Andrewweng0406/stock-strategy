@@ -1508,6 +1508,9 @@ function HealthBadge({ health, baseUrl }) {
   } else if (health.state === "ok" && health.mode === "unavailable") {
     dot = "#d8622b";
     label = "市場資料源未設定";
+  } else if (health.state === "ok" && health.mode === "mock") {
+    dot = "#d8622b";
+    label = "已連線（Demo/Mock 模式 · 非真實資料）";
   } else if (health.state === "ok") {
     dot = "#8d8d93";
     label = `已連線（${health.mode || "unknown"} 模式 · 請確認資料來源）`;
