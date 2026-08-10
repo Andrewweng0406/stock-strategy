@@ -790,3 +790,70 @@ def test_migration_leaves_a_completed_database_untouched(tmp_path) -> None:
     with engine.begin() as connection:
         database.relax_gex_snapshot_level_columns(connection)
     assert _count(engine, "gex_snapshots") == 253
+
+
+def test_migration_does_not_resurrect_pruned_rows_on_a_later_startup(tmp_path) -> None:
+    """The bug a row-count-based resume trigger has no way to avoid: once
+    the migration has genuinely finished, ANY later legitimate shrinkage of
+    the live table (a future retention/pruning policy, not corruption)
+    must never be read as "the migration must have failed, restore from
+    backup" — that would silently destroy every row deleted on purpose.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 252
+
+    # Simulate a retention policy pruning most of the table — nothing to do
+    # with the migration, just normal application behavior after the fact.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DELETE FROM gex_snapshots WHERE id > 10")
+    assert _count(engine, "gex_snapshots") == 10
+
+    # A naive "live_rows < backup_rows -> resume" trigger would see 10 < 252
+    # here and restore the full pre-migration backup, undoing the prune.
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 10
+
+
+def test_migration_marks_a_pre_existing_completed_backup_done_without_recopying(
+    tmp_path,
+) -> None:
+    """A database migrated before this fix landed has a backup that was
+    never renamed with the done marker, even though its migration finished
+    cleanly. The first startup under the new code must recognize that (live
+    rows already cover the backup) and just mark it done — not treat it as
+    unfinished and re-copy over rows the application may have already
+    changed since.
+    """
+    engine = _legacy_sqlite_engine(tmp_path / "legacy.db")
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+    assert _count(engine, "gex_snapshots") == 252
+
+    # Roll back the done marker to simulate a pre-fix backup: fully copied,
+    # verified, just never renamed.
+    backup = next(n for n in _table_names(engine) if n.startswith("gex_snapshots_backup_"))
+    assert backup.endswith(database._GEX_SNAPSHOT_BACKUP_DONE_SUFFIX)
+    undone = backup.removesuffix(database._GEX_SNAPSHOT_BACKUP_DONE_SUFFIX)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER TABLE {backup} RENAME TO {undone}")
+
+    # Real post-migration activity: a row the pre-fix backup doesn't have.
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO gex_snapshots VALUES "
+            "(9999, 'MSFT', 30, '2026-08-02 00:00:00', 100.0, NULL, NULL, NULL, "
+            "-5.0, 40.0, 'NEG_GAMMA')"
+        )
+    assert _count(engine, "gex_snapshots") == 253
+
+    with engine.begin() as connection:
+        database.relax_gex_snapshot_level_columns(connection)
+
+    # The extra row survived — a re-copy from the (253-row-short) backup
+    # would have wiped it.
+    assert _count(engine, "gex_snapshots") == 253
+    backups = [n for n in _table_names(engine) if n.startswith("gex_snapshots_backup_")]
+    assert all(n.endswith(database._GEX_SNAPSHOT_BACKUP_DONE_SUFFIX) for n in backups)

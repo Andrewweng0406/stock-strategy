@@ -366,6 +366,13 @@ _GEX_SNAPSHOT_COLUMNS = (
 
 
 _GEX_SNAPSHOT_BACKUP_PREFIX = f"{GEXSnapshotDBRecord.__tablename__}_backup_"
+# Appended to a backup's name once its data has been verified fully copied
+# into the live table. Marks it as permanently out of consideration for
+# _resume_interrupted_migration's row-count comparison — see that
+# function's docstring for why comparing counts against an old, completed
+# backup is unsafe once the live table has any reason to legitimately lose
+# rows later (e.g. a future retention/pruning policy).
+_GEX_SNAPSHOT_BACKUP_DONE_SUFFIX = "_done"
 
 
 def _row_count(connection, table: str) -> int:
@@ -400,22 +407,46 @@ def _create_gex_snapshots_table(connection) -> None:
     GEXSnapshotDBRecord.__table__.create(connection)
 
 
+def _mark_backup_done(connection, backup: str) -> None:
+    """Rename a backup once its data is verified fully copied, so it's
+    permanently excluded from _resume_interrupted_migration's candidate
+    list — see that function's docstring for why.
+    """
+    connection.exec_driver_sql(
+        f"ALTER TABLE {backup} RENAME TO {backup}{_GEX_SNAPSHOT_BACKUP_DONE_SUFFIX}"
+    )
+
+
 def _resume_interrupted_migration(connection, table: str, backups: list[str]) -> None:
-    """Re-copy from the newest backup if the live table is missing rows.
+    """Re-copy from the newest not-yet-completed backup, if any.
 
     Under pysqlite every DDL statement autocommits, escaping the enclosing
     transaction — so a crash partway through the rebuild leaves the rename
     and the CREATE committed while the INSERT...SELECT rolls back. That is
-    exactly how the live table can end up empty next to a full backup, and
-    it is why this runs before the nullability check below: by then the
-    columns already look correct, so a plain "is it stale?" test would
-    return early and call the data loss permanent.
+    exactly how the live table can end up empty next to a full backup.
+
+    `backups` only ever contains backups NOT already marked done (the
+    caller filters those out), so there is nothing here to compare row
+    counts against once a migration has actually finished — a completed
+    backup is excluded from this function entirely, permanently, rather
+    than relying on "live_rows >= backup_rows" as a proxy for "already
+    migrated". That comparison used to run on every startup forever
+    (backups are intentionally never dropped), which is safe only as long
+    as nothing else ever legitimately shrinks the live table — a future
+    retention/pruning policy on gex_snapshots would otherwise make this
+    silently restore a stale pre-migration snapshot set on the next
+    restart, destroying every row written since.
     """
     backup = backups[-1]
     backup_rows = _row_count(connection, backup)
     live_exists = table in set(inspect(connection).get_table_names())
     live_rows = _row_count(connection, table) if live_exists else 0
     if live_exists and live_rows >= backup_rows:
+        # The live table already has at least as much data as this specific
+        # backup — the copy finished, just before this backup got marked
+        # done (e.g. a crash between _verify_copy and _mark_backup_done).
+        # Finish marking it rather than re-copying data that's already there.
+        _mark_backup_done(connection, backup)
         return
 
     logger.warning(
@@ -429,6 +460,7 @@ def _resume_interrupted_migration(connection, table: str, backups: list[str]) ->
         connection.exec_driver_sql(f"DELETE FROM {table}")
     _copy_rows(connection, backup, table)
     _verify_copy(connection, backup, table)
+    _mark_backup_done(connection, backup)
     logger.warning("Recovered %d row(s) into %s from %s", backup_rows, table, backup)
 
 
@@ -452,7 +484,15 @@ def relax_gex_snapshot_level_columns(connection) -> None:
     table = GEXSnapshotDBRecord.__tablename__
     names = set(inspect(connection).get_table_names())
 
-    backups = sorted(name for name in names if name.startswith(_GEX_SNAPSHOT_BACKUP_PREFIX))
+    # Backups already marked done are excluded here, not just skipped by
+    # _resume_interrupted_migration — a completed migration should never
+    # again be a candidate for row-count comparison against the live table.
+    backups = sorted(
+        name
+        for name in names
+        if name.startswith(_GEX_SNAPSHOT_BACKUP_PREFIX)
+        and not name.endswith(_GEX_SNAPSHOT_BACKUP_DONE_SUFFIX)
+    )
     if backups:
         _resume_interrupted_migration(connection, table, backups)
         names = set(inspect(connection).get_table_names())
@@ -487,6 +527,7 @@ def relax_gex_snapshot_level_columns(connection) -> None:
         _create_gex_snapshots_table(connection)
         _copy_rows(connection, backup, table)
         _verify_copy(connection, backup, table)
+        _mark_backup_done(connection, backup)
         return
 
     # Postgres has real transactional DDL, so this one is genuinely atomic.
