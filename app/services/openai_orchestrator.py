@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from datetime import date
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -409,6 +410,7 @@ class LLMOrchestrator:
         risk: RiskProfile,
         days_to_expiration: int,
         profile: UserProfile | None = None,
+        aggregate_expiration_dates: list[date] | None = None,
     ) -> str:
         context = json.dumps(
             {
@@ -421,6 +423,15 @@ class LLMOrchestrator:
                 "user_profile": (
                     profile.model_dump(mode="json", exclude={"user_id", "updated_at"})
                     if profile
+                    else None
+                ),
+                # When set, gex_summary above is combined across ALL of these
+                # expirations, not just days_to_expiration — a single Zero
+                # Gamma/Call Wall/Put Wall/Net GEX describing a blend, not
+                # one specific date.
+                "aggregated_across_expirations": (
+                    [d.isoformat() for d in aggregate_expiration_dates]
+                    if aggregate_expiration_dates
                     else None
                 ),
             },
@@ -491,6 +502,16 @@ precise, probability-aware advice from the authoritative market context below.
     whichever Wall sits closest. State levels and direction concretely,
     not hedged or vague — this is a mechanical consequence of dealer
     hedging flow, not a prediction of market maker motive.
+14. If aggregated_across_expirations is non-null, every level in
+    gex_summary is a blend across those dates, not one specific
+    expiration — say so plainly when discussing walls or Zero Gamma (e.g.
+    "combined across your next N expirations"), and never present a
+    blended level as if it belongs to a single date the user didn't ask
+    about. If the user asks about one specific expiration by name, answer
+    only from days_to_expiration/gex_summary when
+    aggregated_across_expirations is null; when it's set, say plainly that
+    this turn's data is the aggregate, not that one date, rather than
+    guessing at a single-expiration number that isn't in <context>.
 </behavior_rules>
 """.strip()
 
@@ -778,7 +799,11 @@ trade. Give a direct, honest post-trade diagnosis.
             response = await self.client.responses.create(
                 model=self.model,
                 instructions=self._instructions(
-                    summary, risk, context.days_to_expiration, profile
+                    summary,
+                    risk,
+                    context.days_to_expiration,
+                    profile,
+                    context.expiration_dates if context.aggregate else None,
                 ),
                 input=input_items,
                 tools=[self._tool()],

@@ -117,6 +117,14 @@ class ChatContext(StrictModel):
     conversation_id: str = Field(min_length=1, max_length=128)
     ticker: str = Field(min_length=1, max_length=32)
     days_to_expiration: int | None = Field(default=None, ge=0, le=730)
+    # When the GEX panel is in Aggregate mode, the numbers on screen are
+    # combined across expiration_dates (up to the same 6-expiration cap the
+    # GEX panel itself uses) rather than the single days_to_expiration
+    # snapshot above. Without this, the chat backend silently reasoned over
+    # a different (single-expiration) dataset than what was visually
+    # displayed whenever aggregate mode was on.
+    aggregate: bool = False
+    expiration_dates: list[date] = Field(default_factory=list, max_length=6)
     history: list[ChatMessage] = Field(default_factory=list, max_length=30)
 
 

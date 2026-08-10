@@ -719,6 +719,14 @@ export default function TradingTerminalNotebook() {
             conversation_id: conversationId,
             ticker: ticker,
             days_to_expiration: resolvedDte,
+            // Match what the GEX panel actually shows: when Aggregate mode
+            // is on, the copilot has to reason over the same combined
+            // dataset, not a single nearest-expiration snapshot the user
+            // isn't looking at.
+            aggregate: aggregateMode,
+            expiration_dates: aggregateMode
+              ? aggregateExpirations.map((e) => e.date)
+              : [],
             history: priorHistory,
           },
         }),

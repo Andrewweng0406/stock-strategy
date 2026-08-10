@@ -278,9 +278,17 @@ async def chat(
         if payload.context.days_to_expiration is not None
         else 30
     )
-    summary = await services.gex_service.get_summary(
-        payload.context.ticker, effective_dte
-    )
+    if payload.context.aggregate and payload.context.expiration_dates:
+        # Match what Aggregate mode actually shows on screen — combined
+        # across expiration_dates — rather than silently reasoning over a
+        # single nearest-expiration snapshot the user isn't looking at.
+        summary = await services.gex_service.get_aggregate_summary(
+            payload.context.ticker, payload.context.expiration_dates
+        )
+    else:
+        summary = await services.gex_service.get_summary(
+            payload.context.ticker, effective_dte
+        )
     risk = parse_gex_risk_profile(summary, effective_dte)
     llm_payload = (
         payload

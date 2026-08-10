@@ -166,3 +166,61 @@ def test_chat_null_dte_uses_backend_fallback_in_model_context(monkeypatch) -> No
     context_json = instructions.split("<context>", 1)[1].split("</context>", 1)[0]
     context = json.loads(context_json)
     assert context["days_to_expiration"] == 30
+
+
+def test_chat_in_aggregate_mode_uses_the_combined_summary_not_a_single_dte(
+    monkeypatch,
+) -> None:
+    """The GEX panel's Aggregate mode shows numbers combined across several
+    expirations. Before this fix, chat always reasoned over a single
+    nearest-expiration snapshot instead — a different dataset than what was
+    on screen, with no indication to the model that anything was blended.
+    """
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"CHATAGG{suffix}"
+    dates = ["2099-08-14", "2099-08-21"]
+
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    responses = _FakeResponses()
+    with TestClient(app) as client:
+        # A single-DTE snapshot with one stock_price ...
+        _seed_cache(client, monkeypatch, ticker, dte=6)
+        # ... and a distinguishable aggregate snapshot across both dates.
+        aggregate_response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": ticker,
+                "expiration_dates": dates,
+                "summary": {
+                    "ticker": ticker,
+                    "stock_price": 250.0,
+                    "zero_gamma": 240.0,
+                    "call_wall": 260.0,
+                    "put_wall": 230.0,
+                    "iv_rank": 55.0,
+                    "net_gex": 5_000_000.0,
+                    "gex_status": "POS_GAMMA",
+                },
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+        assert aggregate_response.status_code == 200
+
+        app.state.services.llm = LLMOrchestrator(
+            SimpleNamespace(responses=responses), "test-model", 250
+        )
+        payload = _chat_payload(
+            f"agg-user-{suffix}", f"agg-conv-{suffix}", ticker, "整體怎麼看"
+        )
+        payload["context"]["aggregate"] = True
+        payload["context"]["expiration_dates"] = dates
+        response = client.post("/api/v1/chat", json=payload)
+        assert response.status_code == 200
+
+    instructions = responses.requests[0]["instructions"]
+    context_json = instructions.split("<context>", 1)[1].split("</context>", 1)[0]
+    context = json.loads(context_json)
+    # The aggregate summary, not the single-DTE one, reached the model.
+    assert context["gex_summary"]["stock_price"] == 250.0
+    assert context["gex_summary"]["call_wall"] == 260.0
+    assert context["aggregated_across_expirations"] == dates
