@@ -30,6 +30,10 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 
+class MarketDataUnavailableError(RuntimeError):
+    """Raised when no trusted market-data source can serve the request."""
+
+
 def _is_third_friday(value: date) -> bool:
     return value.weekday() == 4 and 15 <= value.day <= 21
 
@@ -145,6 +149,21 @@ class MockMarketDataClient(MarketDataClient):
         base = await self.get_gex_summary(ticker, 30)
         multiplier = max(len(expiration_dates), 1)
         return base.model_copy(update={"net_gex": base.net_gex * multiplier})
+
+
+class UnavailableMarketDataClient(MarketDataClient):
+    async def get_gex_summary(
+        self, ticker: str, days_to_expiration: int
+    ) -> OptionGEXSummary:
+        raise MarketDataUnavailableError("No trusted market-data source is configured")
+
+    async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
+        raise MarketDataUnavailableError("No trusted market-data source is configured")
+
+    async def get_gex_summary_multi(
+        self, ticker: str, expiration_dates: list[date]
+    ) -> OptionGEXSummary:
+        raise MarketDataUnavailableError("No trusted market-data source is configured")
 
 
 class MoomooMarketDataClient(MarketDataClient):
@@ -363,10 +382,9 @@ class YFinanceMarketDataClient(MarketDataClient):
 
     yfinance is an unofficial library that scrapes Yahoo Finance's public
     endpoints (no documented SLA, could change or get rate-limited without
-    notice) — acceptable here because this is a secondary/tertiary data
-    source behind FallbackMarketDataClient, not the primary trading
-    surface; a failure here just falls through to mock, same as any other
-    fetch failure.
+    notice) — acceptable here only as a labelled delayed-data source. If it
+    fails in production, FallbackMarketDataClient fails closed unless
+    synthetic demo data has been explicitly enabled.
     """
 
     def __init__(
@@ -540,10 +558,12 @@ class FallbackMarketDataClient(MarketDataClient):
         primary: MarketDataClient,
         fallback: MarketDataClient,
         primary_mode: str = "moomoo",
+        allow_synthetic_fallback: bool = False,
     ) -> None:
         self.primary = primary
         self.fallback = fallback
         self.primary_mode = primary_mode
+        self.allow_synthetic_fallback = allow_synthetic_fallback
         self.using_fallback = False
 
     @property
@@ -557,9 +577,15 @@ class FallbackMarketDataClient(MarketDataClient):
             result = await self.primary.get_gex_summary(ticker, days_to_expiration)
             self.using_fallback = False
             return result
-        except Exception:
+        except Exception as exc:
+            if not self.allow_synthetic_fallback:
+                self.using_fallback = False
+                logger.exception("Market data source failed; synthetic fallback disabled")
+                raise MarketDataUnavailableError(
+                    "Market data is unavailable and synthetic fallback is disabled"
+                ) from exc
             self.using_fallback = True
-            logger.exception("Moomoo OpenD failed; using mock market data")
+            logger.exception("Market data source failed; using synthetic mock market data")
             return await self.fallback.get_gex_summary(ticker, days_to_expiration)
 
     async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
@@ -567,9 +593,15 @@ class FallbackMarketDataClient(MarketDataClient):
             result = await self.primary.get_available_expirations(ticker)
             self.using_fallback = False
             return result
-        except Exception:
+        except Exception as exc:
+            if not self.allow_synthetic_fallback:
+                self.using_fallback = False
+                logger.exception("Market data source failed; synthetic fallback disabled")
+                raise MarketDataUnavailableError(
+                    "Market data is unavailable and synthetic fallback is disabled"
+                ) from exc
             self.using_fallback = True
-            logger.exception("Moomoo OpenD failed; using mock expirations")
+            logger.exception("Market data source failed; using synthetic mock expirations")
             return await self.fallback.get_available_expirations(ticker)
 
     async def get_gex_summary_multi(
@@ -581,9 +613,15 @@ class FallbackMarketDataClient(MarketDataClient):
             )
             self.using_fallback = False
             return result
-        except Exception:
+        except Exception as exc:
+            if not self.allow_synthetic_fallback:
+                self.using_fallback = False
+                logger.exception("Market data source failed; synthetic fallback disabled")
+                raise MarketDataUnavailableError(
+                    "Market data is unavailable and synthetic fallback is disabled"
+                ) from exc
             self.using_fallback = True
-            logger.exception("Moomoo OpenD failed; using mock aggregate market data")
+            logger.exception("Market data source failed; using synthetic mock aggregate market data")
             return await self.fallback.get_gex_summary_multi(
                 ticker, expiration_dates
             )

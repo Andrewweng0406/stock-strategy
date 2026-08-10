@@ -10,8 +10,10 @@ cloud (no credentials required):
 - **Cloud**: yfinance, no login required, ~15-20 min delayed data, no
   broker-calculated Greeks (the backend computes gamma via Black-Scholes
   itself in that case).
-- If neither is reachable, both fall back to deterministic mock data so the
-  API never hard-fails.
+- **Synthetic/demo**: deterministic mock data is available only when
+  `SYNTHETIC_MARKET_DATA_ENABLED=true`. Production should keep it disabled;
+  if trusted market data is unavailable, the API fails closed with 503 rather
+  than showing fake levels.
 
 An optional **CloudSync** mechanism lets a local instance (with real Moomoo
 data) push its computed GEX summaries to a cloud deployment's cache, without
@@ -60,7 +62,9 @@ you're likely to actually change). Worth understanding:
 
 - `MOOMOO_ENABLED` — set `false` on any deployment that shouldn't (or can't)
   hold brokerage credentials, e.g. the cloud instance. Falls back to
-  yfinance, then mock.
+  yfinance when `YFINANCE_FALLBACK_ENABLED=true`.
+- `SYNTHETIC_MARKET_DATA_ENABLED` — explicit demo/sandbox opt-in for
+  deterministic mock data. Keep `false` for any user-facing paid product.
 - `CLOUD_SYNC_URL` / `SYNC_TOKEN` — set on the **local** instance only, to
   push real GEX summaries to a cloud deployment's cache. Never set
   `MOOMOO_*` credentials on the cloud instance itself.
@@ -71,7 +75,7 @@ you're likely to actually change). Worth understanding:
 
 ## Main endpoints
 
-- `GET /health` — reports `market_data_mode` (`moomoo` / `yfinance` / `mock`)
+- `GET /health` — reports `market_data_mode` (`moomoo` / `yfinance` / `mock` / `unavailable`)
 - `GET /api/v1/gex/{ticker}?days_to_expiration=30` — single-expiration GEX summary
 - `GET /api/v1/gex/{ticker}/aggregate?expirations=...` — aggregate GEX across up to 6 expirations
 - `GET /api/v1/gex/{ticker}/history?limit=100` — persisted GEX snapshot history

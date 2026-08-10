@@ -43,9 +43,6 @@ const MONO =
 const SCRIPT =
   '[font-family:"Segoe_Script","Bradley_Hand","Noteworthy","Comic_Sans_MS",cursive]';
 
-// Illustrative-only trend — the backend has no historical GEX endpoint yet.
-const DEMO_SPARK_VALUES = [1.8, 0.9, -0.3, -0.6, -1.4, -1.0, -2.1];
-
 // How many of the (potentially dozens of) real expirations the backend
 // returns get shown in the picker. Near-term contracts are what
 // cross-period GEX judgment actually needs — LEAPS two years out would
@@ -310,8 +307,15 @@ function GexChart({ putWall, zeroGamma, callWall, gexStatus }) {
   );
 }
 
-function Sparkline({ values }) {
+function Sparkline({ values, labels = [] }) {
   const [hover, setHover] = useState(null); // { i, x, y }
+  if (!values || values.length < 2) {
+    return (
+      <div className="h-[62px] flex items-center justify-center text-[10.5px] text-[#57575c] border border-dashed border-[rgba(240,237,229,.12)] rounded">
+        尚無足夠歷史快照
+      </div>
+    );
+  }
   const W = 300,
     H = 62,
     pad = 6;
@@ -323,7 +327,7 @@ function Sparkline({ values }) {
   const linePath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
   const areaPath = `${linePath} L${pts[pts.length - 1][0].toFixed(1)},${H - pad} L${pts[0][0].toFixed(1)},${H - pad} Z`;
   const last = pts[pts.length - 1];
-  const dayLabel = (i) => (i === values.length - 1 ? "今天" : `${values.length - 1 - i} 天前`);
+  const dayLabel = (i) => labels[i] || (i === values.length - 1 ? "最新" : `${values.length - 1 - i} 筆前`);
 
   return (
     <div className="relative">
@@ -365,10 +369,10 @@ function Sparkline({ values }) {
         )}
       </svg>
       {hover != null && (
-        <ChartTooltip
+          <ChartTooltip
           point={hover}
           title={dayLabel(hover.i)}
-          lines={[`Net GEX（估算）: ${values[hover.i] >= 0 ? "+" : ""}${values[hover.i].toFixed(1)}`]}
+          lines={[`Net GEX: ${fmtCompactUsd(values[hover.i])}`]}
         />
       )}
     </div>
@@ -394,6 +398,8 @@ export default function TradingTerminalNotebook() {
   const [gexData, setGexData] = useState(null);
   const [gexLoading, setGexLoading] = useState(false);
   const [gexError, setGexError] = useState(null);
+  const [gexHistory, setGexHistory] = useState([]);
+  const [gexHistoryError, setGexHistoryError] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -485,6 +491,8 @@ export default function TradingTerminalNotebook() {
     setExpirationsTicker(null);
     setSelectedDate(null);
     setGexData(null);
+    setGexHistory([]);
+    setGexHistoryError(null);
     setGexError(null);
     setGexLoading(true);
     setExpirationsLoading(true);
@@ -510,6 +518,28 @@ export default function TradingTerminalNotebook() {
         setExpirationsLoading(false);
         // Nothing will fetch GEX now, so don't leave the panel spinning.
         setGexLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setGexHistory([]);
+    setGexHistoryError(null);
+    fetch(`${BASE_URL}/api/v1/gex/${ticker}/history?limit=30`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await parseErrorDetail(res));
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setGexHistory(data.snapshots || []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setGexHistoryError(err.message || "無法取得 GEX 歷史");
       });
     return () => {
       cancelled = true;
@@ -796,6 +826,9 @@ export default function TradingTerminalNotebook() {
   }
 
   const netGexTone = gexData?.gex_status === "NEG_GAMMA" ? "bear" : "bull";
+  const gexHistoryChronological = [...gexHistory].reverse();
+  const gexHistoryValues = gexHistoryChronological.map((s) => s.net_gex);
+  const gexHistoryLabels = gexHistoryChronological.map((s) => fmtDateTime(s.captured_at));
 
   return (
     <div className={`h-screen flex flex-col bg-[#121214] text-[#f0ede5] ${MONO} text-[13px] overflow-hidden`}>
@@ -948,10 +981,18 @@ export default function TradingTerminalNotebook() {
                 <Card>
                   <CardTitle
                     title="Net GEX Trend"
-                    tag="5D · Estimated"
-                    tagTitle="示意趨勢，非真實歷史資料 — 後端目前沒有 GEX 歷史時序端點"
+                    tag={gexHistoryValues.length ? `${gexHistoryValues.length} snapshots` : "No history"}
+                    tagTitle={
+                      gexHistoryError ||
+                      "來自後端 gex_snapshots；沒有真實快照時不顯示假趨勢"
+                    }
                   />
-                  <Sparkline values={DEMO_SPARK_VALUES} />
+                  <Sparkline values={gexHistoryValues} labels={gexHistoryLabels} />
+                  {gexHistoryError && (
+                    <div className="text-[9.5px] text-[#d8622b] mt-1.5">
+                      ⚠ {gexHistoryError}
+                    </div>
+                  )}
                 </Card>
               </>
             )}
@@ -1497,6 +1538,9 @@ function HealthBadge({ health, baseUrl }) {
   } else if (health.state === "ok" && health.mode === "yfinance") {
     dot = "#c9a15c";
     label = "已連線（Yahoo Finance · 約 15-20 分鐘延遲）";
+  } else if (health.state === "ok" && health.mode === "unavailable") {
+    dot = "#d8622b";
+    label = "市場資料源未設定";
   } else if (health.state === "ok") {
     dot = "#8d8d93";
     label = `已連線（${health.mode || "mock"} 模式 · 非真實資料）`;

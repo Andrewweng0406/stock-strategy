@@ -43,12 +43,9 @@ class CloudSync:
         self, ticker: str, expirations: list[ExpirationInfo]
     ) -> None:
         """Push the real expiration-date list too, not just GEX summaries.
-        Without this, the cloud deployment's own /api/v1/expirations always
-        falls back to MockMarketDataClient's synthetic dates (its own
-        primary Moomoo connection never succeeds there) — so the frontend's
-        default-selected expiration on the cloud almost never matches a
-        days_to_expiration this instance has actually pushed real data for,
-        and the cloud UI keeps showing mock numbers even after a real push.
+        This keeps the cloud frontend's selected expiration aligned with the
+        same real chain the local Moomoo-backed instance just computed, rather
+        than relying on whichever delayed source the cloud can fetch itself.
         """
         payload = {
             "ticker": ticker,
@@ -78,8 +75,8 @@ class CloudSync:
         right after a fresh (non-cached) compute — same one-shot treatment
         the local cache itself already gives aggregate results (a 30s TTL,
         refreshed only on the next explicit request, not proactively) — so
-        the cloud stops being permanently stuck on mock for aggregate mode
-        without reintroducing the rate-limit risk.
+        the cloud can serve the real aggregate payload without reintroducing
+        the rate-limit risk.
         """
         payload = {
             "ticker": ticker,

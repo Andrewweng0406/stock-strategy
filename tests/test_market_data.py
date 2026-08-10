@@ -6,8 +6,11 @@ import pytest
 
 from app.analytics import GEXCalculator
 from app.market_data import (
+    FallbackMarketDataClient,
+    MarketDataUnavailableError,
     MockMarketDataClient,
     MoomooMarketDataClient,
+    UnavailableMarketDataClient,
     YFinanceMarketDataClient,
     _is_third_friday,
     classify_expiration,
@@ -119,6 +122,53 @@ def test_moomoo_client_sets_a_bounded_connect_timeout() -> None:
 
     mock_context.set_sync_query_connect_timeout.assert_called_once_with(8.0)
     assert result is mock_context
+
+
+class _FailingMarketDataClient(MockMarketDataClient):
+    async def get_gex_summary(self, ticker: str, days_to_expiration: int):
+        raise RuntimeError("primary down")
+
+    async def get_available_expirations(self, ticker: str):
+        raise RuntimeError("primary down")
+
+    async def get_gex_summary_multi(self, ticker: str, expiration_dates: list[date]):
+        raise RuntimeError("primary down")
+
+
+@pytest.mark.asyncio
+async def test_fallback_client_does_not_use_mock_unless_explicitly_enabled() -> None:
+    client = FallbackMarketDataClient(
+        _FailingMarketDataClient(),
+        MockMarketDataClient(),
+        primary_mode="yfinance",
+    )
+
+    with pytest.raises(MarketDataUnavailableError):
+        await client.get_gex_summary("AAPL", 6)
+    assert client.active_mode == "yfinance"
+
+
+@pytest.mark.asyncio
+async def test_fallback_client_can_use_mock_for_explicit_demo_mode() -> None:
+    client = FallbackMarketDataClient(
+        _FailingMarketDataClient(),
+        MockMarketDataClient(),
+        primary_mode="yfinance",
+        allow_synthetic_fallback=True,
+    )
+
+    summary = await client.get_gex_summary("AAPL", 6)
+
+    assert summary.ticker == "AAPL"
+    assert client.active_mode == "mock"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_market_data_client_raises_clear_error() -> None:
+    client = UnavailableMarketDataClient()
+
+    with pytest.raises(MarketDataUnavailableError, match="No trusted"):
+        await client.get_available_expirations("AAPL")
 
 
 # ---------- YFinanceMarketDataClient ----------

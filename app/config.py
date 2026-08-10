@@ -25,9 +25,8 @@ class Settings(BaseSettings):
     # futu-api's OpenQuoteContext has no connect timeout by default (auto
     # reconnect keeps retrying forever) — a sync call issued while OpenD
     # isn't reachable (not started yet, still logging in, network hiccup)
-    # would otherwise hang indefinitely instead of promptly failing over to
-    # FallbackMarketDataClient's mock data. This bounds that wait so the
-    # fallback stays fast, which is the entire point of having one.
+    # would otherwise hang indefinitely instead of promptly failing closed
+    # or falling back to an explicitly enabled demo data source.
     moomoo_connect_timeout_seconds: float = 8.0
     # When Moomoo is disabled (the cloud deployment — OpenD needs real
     # brokerage login credentials, which never leave the local machine),
@@ -38,6 +37,11 @@ class Settings(BaseSettings):
     # itself in that case — see YFinanceMarketDataClient's docstring).
     yfinance_fallback_enabled: bool = True
     yfinance_min_request_interval_seconds: float = 0.5
+    # Synthetic market data is useful for local UI development and tests, but
+    # a paid trading product must never silently replace unavailable market
+    # data with deterministic fake numbers. Keep this off unless a deployment
+    # is explicitly a demo/sandbox.
+    synthetic_market_data_enabled: bool = False
     risk_free_rate: float = 0.045
 
     # Cloud sync: when both are set, this instance pushes real (non-mock) GEX

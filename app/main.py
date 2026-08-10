@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -38,8 +39,10 @@ from app.database import (
 )
 from app.market_data import (
     FallbackMarketDataClient,
+    MarketDataUnavailableError,
     MockMarketDataClient,
     MoomooMarketDataClient,
+    UnavailableMarketDataClient,
     YFinanceMarketDataClient,
 )
 from app.models import (
@@ -135,10 +138,18 @@ async def lifespan(app: FastAPI):
             calculator, settings.yfinance_min_request_interval_seconds,
         )
         primary_mode = "yfinance"
-    else:
+    elif settings.synthetic_market_data_enabled:
         primary = mock
         primary_mode = "mock"
-    market_data = FallbackMarketDataClient(primary, mock, primary_mode=primary_mode)
+    else:
+        primary = UnavailableMarketDataClient()
+        primary_mode = "unavailable"
+    market_data = FallbackMarketDataClient(
+        primary,
+        mock,
+        primary_mode=primary_mode,
+        allow_synthetic_fallback=settings.synthetic_market_data_enabled,
+    )
     cache = ResilientCache(settings.redis_url)
     openai_client = (
         AsyncOpenAI(api_key=settings.openai_api_key)
@@ -214,6 +225,13 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(MarketDataUnavailableError)
+async def market_data_unavailable_handler(
+    request: Request, exc: MarketDataUnavailableError
+):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 def get_services(request: Request) -> AppServices:
@@ -398,13 +416,10 @@ async def sync_expirations(
     services: Services,
     x_sync_token: str = Header(default=""),
 ) -> dict[str, str]:
-    """Companion to /api/v1/sync/gex — without this, the cloud deployment's
-    own /api/v1/expirations always falls back to MockMarketDataClient's
-    synthetic dates (its own primary Moomoo connection never succeeds
-    here), so the frontend's default-selected expiration almost never lines
-    up with a days_to_expiration the local instance has actually pushed
-    real GEX data for, and the cloud UI keeps showing mock numbers on
-    first load even after a real push.
+    """Companion to /api/v1/sync/gex — this lets a local Moomoo-backed
+    instance push the exact expirations it just used into the cloud cache.
+    The cloud can still use yfinance as a delayed source, but synced
+    expirations keep the frontend aligned with the real local GEX snapshots.
     """
     if not settings.sync_token or not hmac.compare_digest(
         x_sync_token, settings.sync_token
@@ -430,10 +445,8 @@ async def sync_gex_aggregate(
     deliberately excluded from the poller's continuous refresh (see
     GEXService.get_aggregate_summary's docstring — polling it would trip
     Moomoo/Futu's option-chain rate limit), so without this endpoint the
-    cloud deployment never receives real aggregate data at all, not even
-    once — the frontend's Aggregate GEX view stays on mock permanently
-    regardless of how much real data the local instance has pushed for
-    single-expiration views.
+    cloud deployment never receives local Moomoo-backed aggregate data, even
+    when single-expiration views are being synced.
     """
     if not settings.sync_token or not hmac.compare_digest(
         x_sync_token, settings.sync_token
