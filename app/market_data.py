@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from datetime import date, timedelta
 from typing import Any, Literal
 
@@ -173,11 +174,17 @@ class MoomooMarketDataClient(MarketDataClient):
         port: int,
         calculator: GEXCalculator,
         connect_timeout_seconds: float = 8.0,
+        option_chain_max_calls: int = 8,
+        option_chain_window_seconds: float = 30.0,
     ) -> None:
         self.host = host
         self.port = port
         self.calculator = calculator
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.option_chain_max_calls = option_chain_max_calls
+        self.option_chain_window_seconds = option_chain_window_seconds
+        self._option_chain_lock = threading.Lock()
+        self._option_chain_call_times: deque[float] = deque()
 
     @staticmethod
     def _normalize_ticker(ticker: str) -> str:
@@ -199,9 +206,30 @@ class MoomooMarketDataClient(MarketDataClient):
         # Without this, a sync call issued while OpenD isn't reachable hangs
         # indefinitely (futu-api's auto-reconnect has no ceiling by default)
         # instead of promptly raising so FallbackMarketDataClient can fail
-        # over to mock data — see app/config.py's moomoo_connect_timeout_seconds.
+        # closed or use explicitly enabled demo data.
         context.set_sync_query_connect_timeout(self.connect_timeout_seconds)
         return context
+
+    def _throttle_option_chain_sync(self) -> None:
+        """Serialize option-chain calls under Moomoo/Futu's 10-calls/30s cap."""
+        if self.option_chain_max_calls <= 0:
+            return
+        with self._option_chain_lock:
+            while True:
+                now = time.monotonic()
+                while (
+                    self._option_chain_call_times
+                    and now - self._option_chain_call_times[0]
+                    >= self.option_chain_window_seconds
+                ):
+                    self._option_chain_call_times.popleft()
+                if len(self._option_chain_call_times) < self.option_chain_max_calls:
+                    self._option_chain_call_times.append(now)
+                    return
+                sleep_for = self.option_chain_window_seconds - (
+                    now - self._option_chain_call_times[0]
+                )
+                time.sleep(max(sleep_for, 0.05))
 
     def _stock_price_sync(self, quote_context: Any, code: str) -> float:
         from futu import RET_OK
@@ -233,6 +261,7 @@ class MoomooMarketDataClient(MarketDataClient):
         from futu import RET_OK
 
         selected_text = expiration.isoformat()
+        self._throttle_option_chain_sync()
         ret, chain = quote_context.get_option_chain(
             code=code, start=selected_text, end=selected_text
         )

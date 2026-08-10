@@ -88,6 +88,26 @@ async def test_get_expirations_survives_cloud_sync_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_summary_keeps_only_latest_dte_active_per_ticker(monkeypatch) -> None:
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        active_window_seconds=300,
+    )
+
+    async def fake_refresh(ticker, dte):
+        return _fake_summary(ticker)
+
+    monkeypatch.setattr(service, "_refresh", fake_refresh)
+
+    await service.get_summary("AAPL", 6)
+    await service.get_summary("AAPL", 13)
+
+    assert set(service._active.keys()) == {("AAPL", 13)}
+
+
+@pytest.mark.asyncio
 async def test_poller_repushes_expirations_even_on_local_cache_hit() -> None:
     """The whole reason the poller re-pushes expirations every cycle is that
     the cloud's cache TTL is shorter than a realistic poll interval, so a
@@ -114,10 +134,11 @@ async def test_poller_repushes_expirations_even_on_local_cache_hit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_poller_refreshes_expirations_once_per_unique_ticker(monkeypatch) -> None:
-    """Expirations are keyed by ticker only, not ticker+DTE — if the same
-    ticker is active at two different DTEs, the poller should still only
-    refresh/push its expirations once per cycle, not once per active pair.
+async def test_run_poller_refreshes_only_latest_dte_per_ticker(monkeypatch) -> None:
+    """OpenD option chains are rate-limited, so a user scrolling through
+    several expirations must not leave every old DTE in the background
+    refresh set. The poller refreshes only the latest active DTE per ticker
+    and pushes expirations once per unique ticker.
     """
     cloud_sync = AsyncMock()
     service = GEXService(
@@ -128,7 +149,7 @@ async def test_run_poller_refreshes_expirations_once_per_unique_ticker(monkeypat
         active_window_seconds=300,
     )
     service._active[("AAPL", 6)] = time.monotonic()
-    service._active[("AAPL", 13)] = time.monotonic()
+    service._active[("AAPL", 13)] = time.monotonic() + 1
 
     refresh_calls = []
 
@@ -152,7 +173,7 @@ async def test_run_poller_refreshes_expirations_once_per_unique_ticker(monkeypat
         await service.run_poller(poll_seconds=10)
     await real_sleep(0)  # let the fire-and-forget cloud push task run
 
-    assert len(refresh_calls) == 2  # both active (ticker, dte) pairs refreshed
+    assert refresh_calls == [("AAPL", 13)]
     assert cloud_sync.push_expirations.await_count == 1  # but only 1 unique ticker
 
 

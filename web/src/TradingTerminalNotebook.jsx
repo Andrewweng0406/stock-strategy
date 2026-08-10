@@ -247,7 +247,7 @@ function GexChart({ putWall, zeroGamma, callWall, stockPrice, gexStatus }) {
 
           return (
             <g
-              key={row.k}
+              key={`${level.label}-${level.k}`}
               tabIndex={0}
               onMouseEnter={enter}
               onMouseMove={move}

@@ -106,11 +106,8 @@ async def test_mock_client_aggregate_inherits_pinning_from_base() -> None:
 def test_moomoo_client_sets_a_bounded_connect_timeout() -> None:
     """futu-api's OpenQuoteContext has no connect timeout by default and
     auto-reconnects forever, so a sync call issued while OpenD isn't
-    reachable would hang indefinitely instead of promptly raising for
-    FallbackMarketDataClient to catch and fail over to mock data. Without
-    calling set_sync_query_connect_timeout(), that fallback isn't actually
-    prompt — this is a real gap found while checking Moomoo reliability
-    ahead of Monday's market open.
+    reachable would hang indefinitely instead of promptly raising for the
+    trusted-data path to fail closed or use explicitly enabled demo data.
     """
     calculator = GEXCalculator(risk_free_rate=0.045)
     client = MoomooMarketDataClient(
@@ -122,6 +119,34 @@ def test_moomoo_client_sets_a_bounded_connect_timeout() -> None:
 
     mock_context.set_sync_query_connect_timeout.assert_called_once_with(8.0)
     assert result is mock_context
+
+
+def test_moomoo_option_chain_calls_are_throttled(monkeypatch) -> None:
+    import app.market_data as market_data_module
+
+    calculator = GEXCalculator(risk_free_rate=0.045)
+    client = MoomooMarketDataClient(
+        "127.0.0.1",
+        11111,
+        calculator,
+        option_chain_max_calls=2,
+        option_chain_window_seconds=10.0,
+    )
+    now = [100.0]
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(market_data_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(market_data_module.time, "sleep", fake_sleep)
+
+    client._throttle_option_chain_sync()
+    client._throttle_option_chain_sync()
+    client._throttle_option_chain_sync()
+
+    assert sleep_calls == [10.0]
 
 
 class _FailingMarketDataClient(MockMarketDataClient):

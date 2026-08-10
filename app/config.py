@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # would otherwise hang indefinitely instead of promptly failing closed
     # or falling back to an explicitly enabled demo data source.
     moomoo_connect_timeout_seconds: float = 8.0
+    # Futu/Moomoo option-chain endpoint is capped at 10 calls / 30s. Keep a
+    # little headroom because OpenD may also be used outside this backend.
+    moomoo_option_chain_max_calls: int = 8
+    moomoo_option_chain_window_seconds: float = 30.0
     # When Moomoo is disabled (the cloud deployment — OpenD needs real
     # brokerage login credentials, which never leave the local machine),
     # fall back to yfinance instead of going straight to synthetic mock

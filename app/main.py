@@ -125,6 +125,8 @@ async def lifespan(app: FastAPI):
         primary = MoomooMarketDataClient(
             settings.moomoo_host, settings.moomoo_port, calculator,
             settings.moomoo_connect_timeout_seconds,
+            settings.moomoo_option_chain_max_calls,
+            settings.moomoo_option_chain_window_seconds,
         )
         primary_mode = "moomoo"
     elif settings.yfinance_fallback_enabled:

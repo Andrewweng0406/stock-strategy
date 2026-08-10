@@ -63,6 +63,9 @@ you're likely to actually change). Worth understanding:
 - `MOOMOO_ENABLED` — set `false` on any deployment that shouldn't (or can't)
   hold brokerage credentials, e.g. the cloud instance. Falls back to
   yfinance when `YFINANCE_FALLBACK_ENABLED=true`.
+- `MOOMOO_OPTION_CHAIN_MAX_CALLS` / `MOOMOO_OPTION_CHAIN_WINDOW_SECONDS` —
+  backend-side guard for Moomoo/Futu's option-chain quota. Defaults to
+  `8 / 30s` to stay below the documented `10 / 30s` cap.
 - `SYNTHETIC_MARKET_DATA_ENABLED` — explicit demo/sandbox opt-in for
   deterministic mock data. Keep `false` for any user-facing paid product.
 - `CLOUD_SYNC_URL` / `SYNC_TOKEN` — set on the **local** instance only, to

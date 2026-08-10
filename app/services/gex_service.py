@@ -56,6 +56,9 @@ class GEXService:
         self, ticker: str, days_to_expiration: int
     ) -> OptionGEXSummary:
         ticker = ticker.strip().upper()
+        for active_ticker, active_dte in list(self._active.keys()):
+            if active_ticker == ticker and active_dte != days_to_expiration:
+                del self._active[(active_ticker, active_dte)]
         self._active[(ticker, days_to_expiration)] = time.monotonic()
         self._prune()
         key = self._cache_key(ticker, days_to_expiration)
@@ -173,7 +176,12 @@ class GEXService:
         while True:
             await asyncio.sleep(poll_seconds)
             self._prune()
-            for ticker, days_to_expiration in list(self._active.keys()):
+            latest_by_ticker: dict[str, tuple[int, float]] = {}
+            for (ticker, days_to_expiration), last_seen in self._active.items():
+                previous = latest_by_ticker.get(ticker)
+                if previous is None or last_seen > previous[1]:
+                    latest_by_ticker[ticker] = (days_to_expiration, last_seen)
+            for ticker, (days_to_expiration, _) in latest_by_ticker.items():
                 try:
                     await self._refresh(ticker, days_to_expiration)
                 except Exception:
