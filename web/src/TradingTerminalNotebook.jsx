@@ -3,17 +3,14 @@ import {
   Activity,
   AlertTriangle,
   BookOpen,
-  Calendar,
   CheckCircle2,
   History,
-  Mic,
   Plus,
   PenTool,
   RefreshCw,
   Send,
   Settings,
   ShieldAlert,
-  Smile,
   Target,
   Wifi,
   X,
@@ -201,52 +198,47 @@ function ChartTooltip({ point, title, lines }) {
   );
 }
 
-/**
- * The backend only returns three GEX levels (zero_gamma / call_wall / put_wall),
- * not a full per-strike chain, so this chart is an illustrative diverging shape
- * calibrated to those three real levels rather than a literal per-strike feed.
- * Hover/focus is honest about that: labeled rows show the real level, filler
- * rows are marked as interpolated, never a fabricated dollar-GEX number.
- */
-function GexChart({ putWall, zeroGamma, callWall, gexStatus }) {
+function GexChart({ putWall, zeroGamma, callWall, stockPrice, gexStatus }) {
   const [hover, setHover] = useState(null); // { i, x, y }
 
   if (putWall == null || zeroGamma == null || callWall == null) {
     return <div className="text-[11px] text-[#57575c] py-6 text-center">— 無資料 —</div>;
   }
-  const zeroFrac = gexStatus === "NEG_GAMMA" ? -0.12 : 0.12;
-  const rows = [
-    { k: putWall, label: "Put Wall", frac: -1, note: "最大 Put 方避險密集區" },
-    { k: (putWall + zeroGamma) / 2, label: null, frac: -0.45, note: "內插估算，非個別檔位真實數據" },
+  const levels = [
+    { k: putWall, label: "Put Wall", color: "#d8622b", note: "後端回傳的 Put Wall" },
     {
       k: zeroGamma,
       label: "Zero Γ",
-      frac: zeroFrac,
+      color: "#c9a15c",
       note: gexStatus === "NEG_GAMMA" ? "現貨低於此價，Gamma 翻負" : "現貨高於此價，Gamma 偏正",
     },
-    { k: (zeroGamma + callWall) / 2, label: null, frac: 0.45, note: "內插估算，非個別檔位真實數據" },
-    { k: callWall, label: "Call Wall", frac: 1, note: "最大 Call 方避險密集區" },
+    { k: callWall, label: "Call Wall", color: "#2fa37a", note: "後端回傳的 Call Wall" },
   ];
+  if (stockPrice != null) {
+    levels.push({ k: stockPrice, label: "Spot", color: "#f0ede5", note: "目前標的價格" });
+  }
+  levels.sort((a, b) => a.k - b.k);
   const W = 300,
-    rowH = 30,
-    padTop = 6,
-    padBottom = 6;
-  const H = rows.length * rowH + padTop + padBottom;
-  const centerX = 150;
-  const maxHalf = 108;
-  const hovered = hover ? rows[hover.i] : null;
+    H = 112,
+    padX = 24;
+  const min = Math.min(...levels.map((level) => level.k));
+  const max = Math.max(...levels.map((level) => level.k));
+  const range = max - min || 1;
+  const xFor = (k) => padX + ((k - min) / range) * (W - padX * 2);
+  const hovered = hover ? levels[hover.i] : null;
 
   return (
     <div className="relative">
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="GEX wall structure">
-        <line x1={centerX} y1={0} x2={centerX} y2={H} stroke="rgba(240,237,229,.16)" strokeWidth={1} />
-        {rows.map((row, i) => {
-          const y = padTop + i * rowH;
-          const barW = Math.abs(row.frac) * maxHalf;
-          const isBull = row.frac >= 0;
-          const x = isBull ? centerX : centerX - barW;
-          const color = isBull ? "#2fa37a" : "#d8622b";
-          const labelX = x + barW / 2;
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="GEX levels">
+        <line x1={padX} y1={56} x2={W - padX} y2={56} stroke="rgba(240,237,229,.2)" strokeWidth={1.5} />
+        <text x={padX} y={92} fontSize="9" fill="#57575c" textAnchor="middle">
+          ${min.toFixed(2)}
+        </text>
+        <text x={W - padX} y={92} fontSize="9" fill="#57575c" textAnchor="middle">
+          ${max.toFixed(2)}
+        </text>
+        {levels.map((level, i) => {
+          const x = xFor(level.k);
           const isHovered = hover?.i === i;
 
           const enter = (e) => setHover({ i, x: e.clientX, y: e.clientY });
@@ -265,33 +257,18 @@ function GexChart({ putWall, zeroGamma, callWall, gexStatus }) {
                 setHover({ i, x: r.right, y: r.top });
               }}
               onBlur={leave}
-              aria-label={`${row.label || "內插值"} $${row.k.toFixed(2)}`}
+              aria-label={`${level.label} $${level.k.toFixed(2)}`}
               style={{ cursor: "pointer", outline: "none" }}
             >
-              {/* full-row transparent hit area, bigger than the painted bar */}
-              <rect x={0} y={y} width={W} height={rowH} fill="transparent" />
-              {row.label === "Zero Γ" && (
-                <line x1={0} y1={y} x2={W} y2={y} stroke="#c9a15c" strokeWidth={1} strokeDasharray="2,3" opacity={0.7} />
-              )}
-              <rect
-                x={x}
-                y={y + 4}
-                width={barW}
-                height={rowH - 12}
-                rx={1.5}
-                fill={color}
-                opacity={isHovered ? 1 : row.label ? 1 : 0.55}
-                stroke={isHovered ? "#f0ede5" : "none"}
-                strokeWidth={isHovered ? 1 : 0}
-              />
-              <text x={8} y={y + rowH / 2 + 4} fontSize="9.5" fill="#57575c">
-                ${row.k.toFixed(2)}
+              <rect x={x - 16} y={24} width={32} height={56} fill="transparent" />
+              <line x1={x} y1={34} x2={x} y2={78} stroke={level.color} strokeWidth={isHovered ? 2.5 : 1.5} />
+              <circle cx={x} cy={56} r={isHovered ? 5 : 4} fill={level.color} stroke="#121214" strokeWidth={1.5} />
+              <text x={x} y={20} fontSize="8.5" fill={level.color} textAnchor="middle">
+                {level.label}
               </text>
-              {row.label && (
-                <text x={labelX} y={y + rowH / 2 - 6} fontSize="8" fill="#c9a15c" textAnchor="middle">
-                  {row.label}
-                </text>
-              )}
+              <text x={x} y={104} fontSize="9" fill="#c7c7cc" textAnchor="middle">
+                ${level.k.toFixed(2)}
+              </text>
             </g>
           );
         })}
@@ -299,7 +276,7 @@ function GexChart({ putWall, zeroGamma, callWall, gexStatus }) {
       {hovered && (
         <ChartTooltip
           point={hover}
-          title={hovered.label || "內插值"}
+          title={hovered.label}
           lines={[`Strike: $${hovered.k.toFixed(2)}`, hovered.note]}
         />
       )}
@@ -879,10 +856,6 @@ export default function TradingTerminalNotebook() {
             <Wifi size={12} className={health.state === "checking" ? "animate-pulse" : ""} />
             {health.state === "checking" ? "測試中…" : "API 連線測試"}
           </button>
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[rgba(201,161,92,.13)] border border-[rgba(201,161,92,.35)] text-[#c9a15c] text-[11px] font-semibold">
-            <Calendar size={12} />
-            Earnings 10/22
-          </div>
         </div>
       </header>
 
@@ -948,7 +921,7 @@ export default function TradingTerminalNotebook() {
 
                 <Card>
                   <CardTitle
-                    title="GEX by Strike"
+                    title="GEX Levels"
                     tag={
                       aggregateMode
                         ? `Aggregate · ${aggregateExpirations.length} 檔到期日`
@@ -961,19 +934,21 @@ export default function TradingTerminalNotebook() {
                     putWall={gexData.put_wall}
                     zeroGamma={gexData.zero_gamma}
                     callWall={gexData.call_wall}
+                    stockPrice={gexData.stock_price}
                     gexStatus={gexData.gex_status}
                   />
-                  <div className="text-[9px] text-[#57575c] mt-1.5 mb-1">
-                    示意分佈，依真實 Zero Γ / Call Wall / Put Wall 校正
-                  </div>
-                  <div className="flex gap-3.5 text-[10px] text-[#8d8d93] mt-1.5">
+                  <div className="flex flex-wrap gap-3.5 text-[10px] text-[#8d8d93] mt-1.5">
                     <span className="flex items-center gap-1.5">
-                      <i className="w-2 h-2 rounded-sm inline-block bg-[#2fa37a]" />
-                      Positive (Call)
+                      <i className="w-2 h-2 rounded-full inline-block bg-[#d8622b]" />
+                      Put Wall
                     </span>
                     <span className="flex items-center gap-1.5">
-                      <i className="w-2 h-2 rounded-sm inline-block bg-[#d8622b]" />
-                      Negative (Put)
+                      <i className="w-2 h-2 rounded-full inline-block bg-[#c9a15c]" />
+                      Zero Γ
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <i className="w-2 h-2 rounded-full inline-block bg-[#2fa37a]" />
+                      Call Wall
                     </span>
                   </div>
                 </Card>
@@ -1153,14 +1128,6 @@ export default function TradingTerminalNotebook() {
             )}
           </div>
           <div className="flex items-center gap-2 px-3.5 py-3 border-t border-[rgba(240,237,229,.09)] bg-[#1b1b1e]">
-            {/* Placeholders — nothing is wired behind them yet, so they're
-                marked inactive instead of looking like working controls. */}
-            <IconButton title="語音輸入（尚未支援）" disabled>
-              <Mic size={16} />
-            </IconButton>
-            <IconButton title="貼圖（尚未支援）" disabled>
-              <Smile size={16} />
-            </IconButton>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1680,24 +1647,6 @@ function CardTitle({ title, tag, tagTitle }) {
         {tag}
       </span>
     </div>
-  );
-}
-
-function IconButton({ title, disabled, children }) {
-  return (
-    <button
-      type="button"
-      title={title}
-      disabled={disabled}
-      aria-disabled={disabled || undefined}
-      className={`w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-md border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] text-[#8d8d93] transition-colors ${
-        disabled
-          ? "opacity-30 cursor-not-allowed"
-          : "hover:text-[#f0ede5] hover:border-[rgba(240,237,229,.16)]"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 

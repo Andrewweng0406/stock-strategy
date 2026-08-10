@@ -187,6 +187,25 @@ function contractSummary(trade) {
   return `${strike} ${type}${trade.contract_symbol ? ` · ${trade.contract_symbol}` : ""}`;
 }
 
+function defaultLeg(expirationDate = "") {
+  return {
+    side: "BUY",
+    option_type: "CALL",
+    strike_price: "",
+    expiration_date: expirationDate || "",
+    quantity: "1",
+    price: "",
+    contract_symbol: "",
+  };
+}
+
+function defaultLegs(expirationDate = "") {
+  return [
+    defaultLeg(expirationDate),
+    { ...defaultLeg(expirationDate), side: "SELL", strike_price: "" },
+  ];
+}
+
 export default function TradeJournalPanel({ userId, ticker, expirationDate, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
@@ -205,7 +224,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     optionType: "CALL",
     strikePrice: "",
     contractSymbol: "",
-    legsText: "",
+    legs: defaultLegs(expirationDate || ""),
     entryPrice: "",
     positionSize: "1",
     entryDate: defaultLocalDateTimeInput(),
@@ -295,12 +314,20 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
       ...d,
       ticker: ticker.toUpperCase(),
       expirationDate: expirationDirty.current ? d.expirationDate : expirationDate || "",
+      legs:
+        expirationDirty.current || !expirationDate
+          ? d.legs
+          : d.legs.map((leg) => ({ ...leg, expiration_date: leg.expiration_date || expirationDate })),
     }));
   }, [ticker, expirationDate]);
 
   useEffect(() => {
     if (expirationDirty.current || tickerDirty.current) return;
-    setDraft((d) => ({ ...d, expirationDate: expirationDate || "" }));
+    setDraft((d) => ({
+      ...d,
+      expirationDate: expirationDate || "",
+      legs: d.legs.map((leg) => ({ ...leg, expiration_date: leg.expiration_date || expirationDate || "" })),
+    }));
   }, [expirationDate]);
 
   // Recomputed each render so a panel left open overnight can't go stale.
@@ -310,6 +337,30 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
   // until the *next* failed submit, long after the user had fixed the field.
   function updateDraft(patch) {
     setDraft((d) => ({ ...d, ...patch }));
+    if (formError) setFormError(null);
+  }
+
+  function updateLeg(index, patch) {
+    setDraft((d) => ({
+      ...d,
+      legs: d.legs.map((leg, i) => (i === index ? { ...leg, ...patch } : leg)),
+    }));
+    if (formError) setFormError(null);
+  }
+
+  function addLeg() {
+    setDraft((d) => ({
+      ...d,
+      legs: [...d.legs, defaultLeg(d.expirationDate)],
+    }));
+    if (formError) setFormError(null);
+  }
+
+  function removeLeg(index) {
+    setDraft((d) => ({
+      ...d,
+      legs: d.legs.filter((_, i) => i !== index),
+    }));
     if (formError) setFormError(null);
   }
 
@@ -327,12 +378,15 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     const strikePrice = parsePositiveNumber(draft.strikePrice);
     let legs = [];
     if (draft.optionType === "MULTI_LEG") {
-      try {
-        const parsed = draft.legsText.trim() ? JSON.parse(draft.legsText) : [];
-        legs = Array.isArray(parsed) ? parsed : null;
-      } catch {
-        legs = null;
-      }
+      legs = draft.legs.map((leg) => ({
+        side: leg.side,
+        option_type: leg.option_type,
+        strike_price: parsePositiveNumber(leg.strike_price),
+        expiration_date: leg.expiration_date,
+        quantity: parsePositiveInt(leg.quantity),
+        price: parsePositiveNumber(leg.price),
+        contract_symbol: leg.contract_symbol.trim() || null,
+      }));
     }
 
     // These used to be a silent `return` — the button simply did nothing.
@@ -343,8 +397,19 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     else if (!draft.optionType) validation = "請選擇 Call/Put 或 Multi-leg";
     else if (draft.optionType !== "MULTI_LEG" && strikePrice === null)
       validation = "履約價必須是大於 0 的數字";
-    else if (draft.optionType === "MULTI_LEG" && (!legs || legs.length < 2))
-      validation = "Multi-leg 請輸入至少兩腿 JSON";
+    else if (draft.optionType === "MULTI_LEG" && legs.length < 2)
+      validation = "Multi-leg 至少需要兩腿";
+    else if (
+      draft.optionType === "MULTI_LEG" &&
+      legs.some(
+        (leg) =>
+          leg.strike_price === null ||
+          leg.quantity === null ||
+          !leg.expiration_date ||
+          leg.price === null
+      )
+    )
+      validation = "請完整填寫每腿的到期日、履約價、口數與價格";
     else if (entryPrice === null) validation = "進場價必須是大於 0 的數字";
     else if (positionSize === null) validation = "口數必須是大於 0 的整數";
     else if (draft.entryDate && new Date(draft.entryDate).getTime() > Date.now() + 60_000)
@@ -400,7 +465,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
         optionType: "CALL",
         strikePrice: "",
         contractSymbol: "",
-        legsText: "",
+        legs: defaultLegs(expirationDate || ""),
         entryPrice: "",
         positionSize: "1",
         entryDate: defaultLocalDateTimeInput(),
@@ -489,7 +554,15 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     !draft.strategyType.trim() ||
     !draft.expirationDate.trim() ||
     (draft.optionType !== "MULTI_LEG" && !draft.strikePrice.trim()) ||
-    (draft.optionType === "MULTI_LEG" && !draft.legsText.trim()) ||
+    (draft.optionType === "MULTI_LEG" &&
+      (draft.legs.length < 2 ||
+        draft.legs.some(
+          (leg) =>
+            !leg.expiration_date.trim() ||
+            !leg.strike_price.trim() ||
+            !leg.quantity.trim() ||
+            !leg.price.trim()
+        ))) ||
     !draft.entryPrice.trim() ||
     !draft.positionSize.trim();
   const closeDisabled = !closeDraft.exitPrice.trim() || !closeDraft.pnl.trim();
@@ -617,7 +690,14 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
               value={draft.expirationDate}
               onChange={(e) => {
                 expirationDirty.current = true;
-                updateDraft({ expirationDate: e.target.value });
+                const nextExpiration = e.target.value;
+                updateDraft({
+                  expirationDate: nextExpiration,
+                  legs: draft.legs.map((leg) => ({
+                    ...leg,
+                    expiration_date: leg.expiration_date || nextExpiration,
+                  })),
+                });
               }}
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
@@ -629,6 +709,10 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
                 updateDraft({
                   optionType: e.target.value,
                   strikePrice: e.target.value === "MULTI_LEG" ? "" : draft.strikePrice,
+                  legs:
+                    e.target.value === "MULTI_LEG" && draft.legs.length < 2
+                      ? defaultLegs(draft.expirationDate)
+                      : draft.legs,
                 })
               }
               className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -665,13 +749,93 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
             />
           )}
           {draft.optionType === "MULTI_LEG" && (
-            <textarea
-              value={draft.legsText}
-              onChange={(e) => updateDraft({ legsText: e.target.value })}
-              placeholder='腿資料 JSON，例如 [{"side":"BUY","option_type":"CALL","strike_price":100,"expiration_date":"2099-08-14","quantity":1,"price":2.5}]'
-              rows={3}
-              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] resize-none ${MONO}`}
-            />
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[9.5px] text-[#57575c]">策略腿</span>
+                <button
+                  type="button"
+                  onClick={addLeg}
+                  className="text-[9.5px] text-[#c9a15c] hover:text-[#d8b06c]"
+                >
+                  + 新增腿
+                </button>
+              </div>
+              {draft.legs.map((leg, index) => (
+                <div
+                  key={index}
+                  className="grid grid-cols-[64px_64px_minmax(0,1fr)_82px_54px_72px_24px] gap-1.5"
+                >
+                  <select
+                    value={leg.side}
+                    onChange={(e) => updateLeg(index, { side: e.target.value })}
+                    className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  >
+                    <option value="BUY">Buy</option>
+                    <option value="SELL">Sell</option>
+                  </select>
+                  <select
+                    value={leg.option_type}
+                    onChange={(e) => updateLeg(index, { option_type: e.target.value })}
+                    className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  >
+                    <option value="CALL">Call</option>
+                    <option value="PUT">Put</option>
+                  </select>
+                  <input
+                    type="date"
+                    value={leg.expiration_date}
+                    onChange={(e) => updateLeg(index, { expiration_date: e.target.value })}
+                    className={`min-w-0 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  />
+                  <input
+                    value={leg.strike_price}
+                    onChange={(e) => updateLeg(index, { strike_price: e.target.value })}
+                    placeholder="Strike"
+                    inputMode="decimal"
+                    className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  />
+                  <input
+                    value={leg.quantity}
+                    onChange={(e) => updateLeg(index, { quantity: e.target.value })}
+                    placeholder="Qty"
+                    inputMode="numeric"
+                    className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  />
+                  <input
+                    value={leg.price}
+                    onChange={(e) => updateLeg(index, { price: e.target.value })}
+                    placeholder="Price"
+                    inputMode="decimal"
+                    className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-1.5 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeLeg(index)}
+                    disabled={draft.legs.length <= 2}
+                    title="刪除此腿"
+                    className="rounded border border-[rgba(240,237,229,.09)] text-[#8d8d93] hover:text-[#f0ede5] disabled:opacity-30"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <input
+                value={draft.legs.map((leg) => leg.contract_symbol).filter(Boolean).join(", ")}
+                onChange={(e) => {
+                  const symbols = e.target.value.split(",").map((s) => s.trim());
+                  setDraft((d) => ({
+                    ...d,
+                    legs: d.legs.map((leg, index) => ({
+                      ...leg,
+                      contract_symbol: symbols[index] || "",
+                    })),
+                  }));
+                  if (formError) setFormError(null);
+                }}
+                placeholder="每腿合約代碼（選填，用逗號分隔）"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+            </div>
           )}
           <div className="flex gap-2">
             <input
