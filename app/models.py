@@ -242,7 +242,7 @@ class TradeCreate(StrictModel):
     strategy_type: str = Field(min_length=1, max_length=128)
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
-    expiration_date: date | None = None
+    expiration_date: date
     source_plan_id: UUID | None = None
     entry_date: datetime | None = None
     entry_price: float = Field(gt=0)
@@ -252,8 +252,6 @@ class TradeCreate(StrictModel):
 
     @model_validator(mode="after")
     def expiration_cannot_precede_entry(self) -> "TradeCreate":
-        if self.expiration_date is None:
-            return self
         entry_date = self.entry_date or datetime.now(timezone.utc)
         if self.expiration_date < entry_date.date():
             raise ValueError("expiration_date cannot be before entry_date")

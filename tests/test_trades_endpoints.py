@@ -111,6 +111,23 @@ def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
     assert response.status_code == 422
 
 
+def test_create_trade_requires_expiration_date(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTNOEXP")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-no-exp",
+                "ticker": "TJTESTNOEXP",
+                "strategy_type": "Long Call",
+                "entry_price": 1.25,
+                "position_size": 2,
+                "days_to_expiration": 30,
+            },
+        )
+    assert response.status_code == 422
+
+
 def test_list_trades_filters_by_ticker_and_status(monkeypatch) -> None:
     # Tickers are suffixed with a fresh uuid per run because these endpoint
     # tests hit the real on-disk dev database (see .env's DATABASE_URL),
@@ -344,6 +361,7 @@ def _create_trade_with_plan(
             "ticker": ticker,
             "strategy_type": "Long Call",
             "source_plan_id": plan_id,
+            "expiration_date": "2099-08-14",
             "entry_price": entry_price,
             "position_size": 1,
             "days_to_expiration": 30,

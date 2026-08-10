@@ -169,6 +169,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     strategyType: "",
     direction: "LONG",
     creditDebit: "DEBIT",
+    expirationDate: expirationDate || "",
     entryPrice: "",
     positionSize: "1",
     entryDate: defaultLocalDateTimeInput(),
@@ -251,10 +252,20 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
   // Once they've typed in the field the panel stops touching it, otherwise a
   // ticker change underneath the open overlay silently reverts their edit.
   const tickerDirty = useRef(false);
+  const expirationDirty = useRef(false);
   useEffect(() => {
     if (!ticker || tickerDirty.current) return;
-    setDraft((d) => ({ ...d, ticker: ticker.toUpperCase() }));
-  }, [ticker]);
+    setDraft((d) => ({
+      ...d,
+      ticker: ticker.toUpperCase(),
+      expirationDate: expirationDirty.current ? d.expirationDate : expirationDate || "",
+    }));
+  }, [ticker, expirationDate]);
+
+  useEffect(() => {
+    if (expirationDirty.current || tickerDirty.current) return;
+    setDraft((d) => ({ ...d, expirationDate: expirationDate || "" }));
+  }, [expirationDate]);
 
   // `dte` is null when the terminal has no expiration resolved for the current
   // ticker (mid-switch, or the expirations fetch failed). Number(null) is 0,
@@ -287,14 +298,13 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
     const strategyValue = draft.strategyType.trim();
     const entryPrice = parsePositiveNumber(draft.entryPrice);
     const positionSize = parsePositiveInt(draft.positionSize);
-    const terminalTicker = (ticker || "").toUpperCase();
-    const tradeExpirationDate =
-      tickerValue && tickerValue === terminalTicker ? expirationDate : null;
+    const tradeExpirationDate = draft.expirationDate.trim() || null;
 
     // These used to be a silent `return` — the button simply did nothing.
     let validation = null;
     if (!tickerValue) validation = "請輸入股票代號";
     else if (!strategyValue) validation = "請輸入策略類型";
+    else if (!tradeExpirationDate) validation = "請選擇到期日";
     else if (entryPrice === null) validation = "進場價必須是大於 0 的數字";
     else if (positionSize === null) validation = "口數必須是大於 0 的整數";
     else if (draft.entryDate && new Date(draft.entryDate).getTime() > Date.now() + 60_000)
@@ -335,11 +345,13 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
       setTrades((t) => [trade, ...t]);
       // Fresh form — the prefill is welcome to take over the ticker again.
       tickerDirty.current = false;
+      expirationDirty.current = false;
       setDraft({
         ticker: (ticker || "").toUpperCase(),
         strategyType: "",
         direction: "LONG",
         creditDebit: "DEBIT",
+        expirationDate: expirationDate || "",
         entryPrice: "",
         positionSize: "1",
         entryDate: defaultLocalDateTimeInput(),
@@ -426,6 +438,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
   const createDisabled =
     !draft.ticker.trim() ||
     !draft.strategyType.trim() ||
+    !draft.expirationDate.trim() ||
     !draft.entryPrice.trim() ||
     !draft.positionSize.trim();
   const closeDisabled = !closeDraft.exitPrice.trim() || !closeDraft.pnl.trim();
@@ -434,7 +447,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
   const tickerOverridden =
     !!draft.ticker.trim() &&
     draft.ticker.trim().toUpperCase() !== (ticker || "").toUpperCase();
-  const effectiveExpirationDate = tickerOverridden ? null : expirationDate;
+  const effectiveExpirationDate = draft.expirationDate.trim() || null;
 
   // Live math for the close form: the same formula the backend uses for
   // pnl_pct, so the ×100 contract multiplier stops being invisible.
@@ -488,8 +501,15 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
             <input
               value={draft.ticker}
               onChange={(e) => {
+                const nextTicker = e.target.value.toUpperCase();
                 tickerDirty.current = true;
-                updateDraft({ ticker: e.target.value });
+                updateDraft({
+                  ticker: e.target.value,
+                  expirationDate:
+                    !expirationDirty.current && nextTicker !== (ticker || "").toUpperCase()
+                      ? ""
+                      : draft.expirationDate,
+                });
               }}
               placeholder="代號"
               className={`w-20 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
@@ -537,6 +557,18 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
                 </option>
               ))}
             </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[9.5px] text-[#57575c]">到期日（請確認買入的合約到期日）</span>
+            <input
+              type="date"
+              value={draft.expirationDate}
+              onChange={(e) => {
+                expirationDirty.current = true;
+                updateDraft({ expirationDate: e.target.value });
+              }}
+              className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+            />
           </div>
           <div className="flex gap-2">
             <input
@@ -603,7 +635,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
           <div className="text-[9px] text-[#57575c] leading-snug">
             {tickerOverridden ? (
               <>
-                代號 {draft.ticker}（手動輸入）· 未保存到期日 · DTE {snapshotDte} 取自終端機目前的{" "}
+                代號 {draft.ticker}（手動輸入）· 到期 {fmtExpirationDate(effectiveExpirationDate)} · DTE {snapshotDte} 取自終端機目前的{" "}
                 {(ticker || "—").toUpperCase()}
               </>
             ) : (
@@ -621,7 +653,7 @@ export default function TradeJournalPanel({ userId, ticker, dte, expirationDate,
             type="button"
             onClick={createTrade}
             disabled={creating || createDisabled}
-            title={createDisabled ? "請先填寫代號、策略類型、進場價與口數" : undefined}
+            title={createDisabled ? "請先填寫代號、策略類型、到期日、進場價與口數" : undefined}
             className="flex items-center justify-center gap-1.5 py-2 rounded-md bg-[#c9a15c] text-[#1a1408] text-[11.5px] font-bold uppercase tracking-wide hover:bg-[#d8b06c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <Plus size={13} />

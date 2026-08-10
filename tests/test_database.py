@@ -224,6 +224,7 @@ async def test_trade_repository_create_defaults_to_open() -> None:
             user_id="user-1",
             ticker="aapl",
             strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0,
             position_size=1,
             days_to_expiration=30,
@@ -244,6 +245,7 @@ async def test_trade_repository_create_defaults_entry_date_to_now() -> None:
     trade = await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -259,6 +261,7 @@ async def test_trade_repository_create_honors_explicit_entry_date() -> None:
     trade = await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
             entry_date=backdated,
         ),
@@ -295,6 +298,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
     await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -302,6 +306,7 @@ async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
     await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="TSLA", strategy_type="Long Put",
+            expiration_date=date(2099, 8, 21),
             entry_price=200.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -323,6 +328,7 @@ async def test_trade_repository_close_trade_computes_pnl_pct() -> None:
     trade = await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -357,6 +363,7 @@ async def test_trade_repository_close_trade_raises_permission_error_for_other_us
     trade = await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
@@ -375,6 +382,7 @@ async def test_trade_repository_close_trade_raises_value_error_when_already_clos
     trade = await repo.create_trade(
         TradeCreate(
             user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
             entry_price=100.0, position_size=1, days_to_expiration=30,
         ),
         entry_gex_snapshot_id=None,
