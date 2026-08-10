@@ -29,6 +29,7 @@ from app.database import (
     ChatRepository,
     GEXSnapshotRepository,
     PlanRepository,
+    PnlMismatchError,
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
@@ -528,6 +529,10 @@ async def close_trade(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except PnlMismatchError as exc:
+        # Checked before the generic ValueError below — PnlMismatchError is
+        # a subclass of it, and the two map to different status codes.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

@@ -283,13 +283,32 @@ def test_close_trade_rejects_already_closed(monkeypatch) -> None:
         close_payload = {
             "exit_price": 120.0,
             "exit_date": datetime.now(timezone.utc).isoformat(),
-            "pnl": 20.0,
+            "pnl": 2000.0,
         }
         client.put(f"/api/v1/trades/{trade['id']}?user_id=user-5", json=close_payload)
         response = client.put(
             f"/api/v1/trades/{trade['id']}?user_id=user-5", json=close_payload
         )
     assert response.status_code == 409
+
+
+def test_close_trade_rejects_pnl_that_disagrees_with_the_fill(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTPNL")
+        trade = _create_trade(client, "user-pnl", "TJTESTPNL")
+        response = client.put(
+            f"/api/v1/trades/{trade['id']}?user_id=user-pnl",
+            json={
+                "exit_price": 120.0,
+                "exit_date": datetime.now(timezone.utc).isoformat(),
+                # entry 100 -> exit 120 on a DEBIT trade implies +2000, not
+                # a loss — this is the sign-flip a client bug or a
+                # non-browser caller could otherwise submit unchecked.
+                "pnl": -2000.0,
+            },
+        )
+    assert response.status_code == 400
+    assert "does not match" in response.json()["detail"]
 
 
 def test_review_trade_requires_closed_status(monkeypatch) -> None:
@@ -353,7 +372,7 @@ def test_get_trade_review_returns_null_before_and_stored_review_after_post(
             json={
                 "exit_price": 120.0,
                 "exit_date": datetime.now(timezone.utc).isoformat(),
-                "pnl": 20.0,
+                "pnl": 2000.0,
             },
         )
 

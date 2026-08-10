@@ -700,6 +700,61 @@ def ensure_trade_metadata_columns(connection) -> None:
     )
 
 
+class PnlMismatchError(ValueError):
+    """close_trade's submitted pnl disagrees with what entry/exit/size/
+    credit_debit imply, by more than real-world slippage or commissions
+    plausibly explain. Distinct from the plain ValueError "already closed"
+    case so app/main.py can map it to 400, not 409.
+    """
+
+
+# How far a submitted pnl may drift from the value entry_price/exit_price/
+# position_size/credit_debit imply before it's rejected outright. This is
+# deliberately looser than the frontend's own mismatch *warning* threshold
+# (web/src/TradeJournal.jsx's PNL_MISMATCH_TOLERANCE) — the manual pnl field
+# is still authoritative for real slippage, commissions, and multi-leg
+# economics the simple formula can't fully capture. What this guards
+# against specifically is the failure mode a client bug or a non-browser
+# caller can produce with nothing else to catch it: a winning trade
+# submitted with the sign flipped, or a scale error (e.g. forgetting the
+# 100x contract multiplier), neither of which real-world slippage explains.
+MAX_PNL_DEVIATION_RATIO = 0.5
+MIN_PNL_DEVIATION_COST_PCT = 0.02
+MIN_PNL_DEVIATION_FLOOR_USD = 10.0
+
+
+def _expected_pnl(
+    entry_price: float,
+    exit_price: float,
+    position_size: int,
+    credit_debit: str,
+) -> float:
+    """Same formula web/src/TradeJournal.jsx's deriveClosePnl uses, so a
+    submission that matches what the UI itself would have derived never
+    trips this — only genuine sign/scale disagreements do.
+    """
+    if credit_debit == TradeCreditDebit.CREDIT.value:
+        return (entry_price - exit_price) * 100 * position_size
+    return (exit_price - entry_price) * 100 * position_size
+
+
+def _pnl_is_plausible(
+    submitted_pnl: float,
+    entry_price: float,
+    exit_price: float,
+    position_size: int,
+    credit_debit: str,
+) -> bool:
+    expected = _expected_pnl(entry_price, exit_price, position_size, credit_debit)
+    cost = entry_price * 100 * position_size
+    tolerance = max(
+        abs(expected) * MAX_PNL_DEVIATION_RATIO,
+        cost * MIN_PNL_DEVIATION_COST_PCT,
+        MIN_PNL_DEVIATION_FLOOR_USD,
+    )
+    return abs(submitted_pnl - expected) <= tolerance
+
+
 class TradeRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -776,6 +831,24 @@ class TradeRepository:
                 raise PermissionError("The trade belongs to a different user")
             if record.status == TradeStatus.CLOSED.value:
                 raise ValueError("Trade is already closed")
+            if not _pnl_is_plausible(
+                close.pnl,
+                record.entry_price,
+                close.exit_price,
+                record.position_size,
+                record.credit_debit,
+            ):
+                expected = _expected_pnl(
+                    record.entry_price,
+                    close.exit_price,
+                    record.position_size,
+                    record.credit_debit,
+                )
+                raise PnlMismatchError(
+                    f"pnl {close.pnl:.2f} does not match what entry_price, "
+                    f"exit_price, position_size, and credit_debit imply "
+                    f"(expected approximately {expected:.2f})"
+                )
             record.exit_price = close.exit_price
             record.exit_date = close.exit_date
             record.pnl = close.pnl

@@ -12,6 +12,7 @@ from app.database import (
     ChatRepository,
     GEXSnapshotRepository,
     PlanRepository,
+    PnlMismatchError,
     ProfileRepository,
     TradeRepository,
     TradeReviewRepository,
@@ -413,10 +414,98 @@ async def test_trade_repository_close_trade_raises_value_error_when_already_clos
         ),
         entry_gex_snapshot_id=None,
     )
-    close = TradeClose(exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=20.0)
+    close = TradeClose(exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=2000.0)
     await repo.close_trade(str(trade.id), "user-1", close)
     with pytest.raises(ValueError):
         await repo.close_trade(str(trade.id), "user-1", close)
+
+
+@pytest.mark.asyncio
+async def test_close_trade_rejects_sign_flipped_pnl() -> None:
+    """A winning long call closed with pnl submitted negative — the exact
+    failure mode a client bug or a non-browser caller can produce with
+    nothing else to catch it. entry 100 -> exit 120 on a DEBIT trade implies
+    +2000, not -2000.
+    """
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
+            entry_price=100.0, position_size=1,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    with pytest.raises(PnlMismatchError):
+        await repo.close_trade(
+            str(trade.id),
+            "user-1",
+            TradeClose(
+                exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=-2000.0
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_close_trade_accepts_pnl_within_realistic_slippage() -> None:
+    """The manual pnl field stays authoritative for real-world slippage and
+    commissions — only gross sign/scale disagreements get rejected.
+    """
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Long Call",
+            expiration_date=date(2099, 8, 14),
+            option_type="CALL", strike_price=100.0,
+            entry_price=100.0, position_size=1,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    # Expected 2000.0; 1900.0 is a plausible slippage/commission haircut.
+    closed = await repo.close_trade(
+        str(trade.id),
+        "user-1",
+        TradeClose(
+            exit_price=120.0, exit_date=datetime.now(timezone.utc), pnl=1900.0
+        ),
+    )
+    assert closed.pnl == 1900.0
+
+
+@pytest.mark.asyncio
+async def test_close_trade_flips_expected_sign_for_credit_strategies() -> None:
+    """A short (credit) trade's pnl formula is inverted from a long/debit
+    one — entry is a credit collected, exit is a debit paid to close.
+    """
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-1", ticker="AAPL", strategy_type="Bull Put Credit Spread",
+            direction=TradeDirection.LONG, credit_debit=TradeCreditDebit.CREDIT,
+            expiration_date=date(2099, 8, 14),
+            option_type="PUT", strike_price=100.0,
+            entry_price=2.50, position_size=2,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+    # Collected $2.50, bought back at $0.50 -> +$400, not -$400.
+    with pytest.raises(PnlMismatchError):
+        await repo.close_trade(
+            str(trade.id),
+            "user-1",
+            TradeClose(
+                exit_price=0.50, exit_date=datetime.now(timezone.utc), pnl=-400.0
+            ),
+        )
+    closed = await repo.close_trade(
+        str(trade.id),
+        "user-1",
+        TradeClose(
+            exit_price=0.50, exit_date=datetime.now(timezone.utc), pnl=400.0
+        ),
+    )
+    assert closed.pnl == 400.0
 
 
 @pytest.mark.asyncio
