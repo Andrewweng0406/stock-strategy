@@ -39,12 +39,10 @@ class GEXService:
         self.snapshot_repository = snapshot_repository
         self.snapshot_interval_seconds = snapshot_interval_seconds
         # Aggregate GEX gets no poller-driven refresh (see
-        # get_aggregate_summary's docstring), so its cache entry has to
-        # live longer than a single-DTE lookup's to have any realistic
-        # chance of still being warm — on the cloud side in particular,
-        # where it's the only thing keeping a synced result from flipping
-        # back to mock within seconds. Defaults to ttl_seconds (old
-        # behavior) when not given explicitly.
+        # get_aggregate_summary's docstring), so its cache entry has to live
+        # longer than a single-DTE lookup's to have any realistic chance of
+        # still being warm on the cloud side. Defaults to ttl_seconds when
+        # not given explicitly.
         self.aggregate_ttl_seconds = aggregate_ttl_seconds if aggregate_ttl_seconds is not None else ttl_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # (ticker, days_to_expiration) -> monotonic time last requested by a
@@ -103,9 +101,9 @@ class GEXService:
         Still pushes to cloud_sync once per fresh (non-cached) compute —
         same one-shot treatment the local cache itself already gives this
         result (bounded by aggregate_ttl_seconds, refreshed only on the
-        next explicit request, never proactively) — so the cloud isn't
-        permanently stuck on mock for aggregate mode just because it's
-        excluded from the poller. aggregate_ttl_seconds is deliberately
+        next explicit request, never proactively) — so the cloud can serve a
+        synced aggregate result even though aggregates are excluded from the
+        poller. aggregate_ttl_seconds is deliberately
         longer than ttl_seconds (see __init__) so a synced result has a
         realistic chance of still being warm the next time someone looks.
         """
@@ -148,9 +146,9 @@ class GEXService:
     async def _refresh(
         self, ticker: str, days_to_expiration: int
     ) -> OptionGEXSummary:
-        """Fetch a fresh summary (bypassing the cache), store it, and — for
-        real (non-mock) data — fire off a cloud sync push. Shared by the
-        request path's cache-miss branch and the background poller.
+        """Fetch a fresh summary (bypassing the cache), store it, and for a
+        trusted local market-data source, fire off a cloud sync push. Shared by
+        the request path's cache-miss branch and the background poller.
         """
         summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
         key = self._cache_key(ticker, days_to_expiration)

@@ -431,8 +431,8 @@ export default function TradingTerminalNotebook() {
           ? Math.min(...aggregateExpirations.map((e) => e.days_to_expiration))
           : null
         : selectedExpiration?.days_to_expiration ?? null;
-  // Backend calls that require an integer still use a fallback, but chat can
-  // send null so the copilot never silently treats "unknown right now" as 0DTE.
+  // Backend endpoints that still require an integer get a numeric default, but
+  // chat can send null so the copilot never treats "unknown right now" as 0DTE.
   const dte = resolvedDte ?? 0;
 
   // ---------- Health check ----------
@@ -1510,7 +1510,7 @@ function HealthBadge({ health, baseUrl }) {
     label = "市場資料源未設定";
   } else if (health.state === "ok") {
     dot = "#8d8d93";
-    label = `已連線（${health.mode || "mock"} 模式 · 非真實資料）`;
+    label = `已連線（${health.mode || "unknown"} 模式 · 請確認資料來源）`;
   } else if (health.state === "error") {
     dot = "#d8622b";
     label = "連線失敗";

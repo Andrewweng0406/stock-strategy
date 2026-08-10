@@ -271,10 +271,8 @@ async def test_run_poller_never_touches_aggregate_cache() -> None:
 @pytest.mark.asyncio
 async def test_aggregate_summary_cached_with_longer_ttl_than_single_dte() -> None:
     """Aggregate results get no poller-driven refresh, so their cache entry
-    needs to outlive a single-DTE lookup's — a short TTL here would mean a
-    synced result flips back to mock within seconds on the cloud side (the
-    real bug this was built to fix). Verifies get_aggregate_summary() uses
-    aggregate_ttl_seconds, not the general ttl_seconds, for its cache.set().
+    needs to outlive a single-DTE lookup's. Verifies get_aggregate_summary()
+    uses aggregate_ttl_seconds, not the general ttl_seconds, for its cache.set().
     """
     cache = AsyncMock()
     cache.get.return_value = None

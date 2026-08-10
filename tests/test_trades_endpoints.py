@@ -13,7 +13,7 @@ def _default_expiration_date(offset_days: int = 30) -> str:
     client-supplied days_to_expiration), so the date used here has to land
     the same `offset_days` out from market_today() that _seed_cache's default
     dte pre-warms the GEX cache under — otherwise create_trade computes a
-    different DTE than what's cached and falls through to a live/mock fetch.
+    different DTE than what's cached and falls through to a live fetch.
     """
     return (market_today() + timedelta(days=offset_days)).isoformat()
 

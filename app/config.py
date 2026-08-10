@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     synthetic_market_data_enabled: bool = False
     risk_free_rate: float = 0.045
 
-    # Cloud sync: when both are set, this instance pushes real (non-mock) GEX
+    # Cloud sync: when both are set, this instance pushes trusted GEX
     # summaries it computes to `{cloud_sync_url}/api/v1/sync/gex`. Used by the
     # local instance (real Moomoo data) to keep the cloud deployment's cache
     # warm with real data, without ever sending Moomoo credentials to the cloud.
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # so on the cloud side its synced cache entry only ever gets refreshed
     # when the local instance happens to compute that exact same expiration
     # combination again. cache_ttl_seconds (30s) is far too short a window
-    # for that to realistically happen — real data would flip back to mock
+    # for that to realistically happen — synced aggregate data would go cold
     # a few seconds after every push. Aggregate results are already the
     # "expensive, less time-sensitive" view by design, so a longer TTL here
     # is a natural fit, not a special case: matches active_window_seconds so
@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # bill. slowapi's rate-string format: "<count>/<second|minute|hour|day>".
     chat_rate_limit: str = "10/minute"
 
-    # How often a real (non-mock) GEX calculation gets written to
+    # How often a trusted GEX calculation gets written to
     # gex_snapshots per ticker — a throttle, not the compute cadence, so the
     # table doesn't fill with near-duplicate rows every poller tick.
     snapshot_interval_seconds: int = 3600
