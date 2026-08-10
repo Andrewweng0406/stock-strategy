@@ -514,7 +514,9 @@ def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() ->
         ).all()
 
     assert rows == [
-        ("trade-1", "SHORT", "CREDIT", None),
+        # Bull Put Credit Spread is bullish despite containing "put" — the
+        # backfill must check "bull" before the generic put/bear match.
+        ("trade-1", "LONG", "CREDIT", None),
         ("trade-2", "NEUTRAL", "CREDIT", None),
     ]
 

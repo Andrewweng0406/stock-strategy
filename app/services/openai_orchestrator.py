@@ -44,6 +44,10 @@ _BULLISH_PATTERN = re.compile(
     r"\bcalls?\b|\bbull(?:ish|s)?\b|\blong(?:ing|s)?\b|做多|看多|看漲|看涨",
     re.IGNORECASE,
 )
+# "bull" must be checked ahead of the bearish pattern: a Bull Put Credit
+# Spread is bullish despite containing "put", which _BEARISH_PATTERN alone
+# would otherwise match first.
+_EXPLICIT_BULL_PATTERN = re.compile(r"\bbull(?:ish|s)?\b|做多|看多|看漲|看涨", re.IGNORECASE)
 
 
 class LLMOrchestrator:
@@ -187,6 +191,8 @@ class LLMOrchestrator:
         # are matched on word boundaries so nothing else can be swallowed by
         # a longer word.
         text = _HORIZON_TERM_PATTERN.sub(" ", text)
+        if _EXPLICIT_BULL_PATTERN.search(text):
+            return "BULLISH"
         if _BEARISH_PATTERN.search(text):
             return "BEARISH"
         if _BULLISH_PATTERN.search(text):

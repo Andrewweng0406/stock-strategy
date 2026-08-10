@@ -608,27 +608,6 @@ class TradeRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-def infer_trade_direction(strategy_type: str) -> TradeDirection:
-    text = strategy_type.lower()
-    if any(token in text for token in ("short", "sell", "covered call", "cash-secured")):
-        return TradeDirection.SHORT
-    if "iron condor" in text or "butterfly" in text or "calendar" in text:
-        return TradeDirection.NEUTRAL
-    if "bear" in text or "put" in text:
-        return TradeDirection.SHORT
-    return TradeDirection.LONG
-
-
-def infer_trade_credit_debit(strategy_type: str) -> TradeCreditDebit:
-    text = strategy_type.lower()
-    if any(
-        token in text
-        for token in ("credit", "covered call", "cash-secured", "iron condor")
-    ):
-        return TradeCreditDebit.CREDIT
-    return TradeCreditDebit.DEBIT
-
-
 def ensure_trade_metadata_columns(connection) -> None:
     table = TradeRecord.__tablename__
     if table not in set(inspect(connection).get_table_names()):
@@ -691,6 +670,9 @@ def ensure_trade_metadata_columns(connection) -> None:
                 WHEN lower(strategy_type) LIKE '%iron condor%'
                   OR lower(strategy_type) LIKE '%butterfly%'
                   OR lower(strategy_type) LIKE '%calendar%' THEN '{TradeDirection.NEUTRAL.value}'
+                -- "bull" must be checked before the generic "put" match below —
+                -- a Bull Put Credit Spread is bullish despite containing "put".
+                WHEN lower(strategy_type) LIKE '%bull%' THEN '{TradeDirection.LONG.value}'
                 WHEN lower(strategy_type) LIKE '%short%'
                   OR lower(strategy_type) LIKE '%sell%'
                   OR lower(strategy_type) LIKE '%covered call%'

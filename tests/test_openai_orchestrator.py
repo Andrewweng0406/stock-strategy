@@ -488,6 +488,15 @@ def test_infer_bias_ignores_short_term_and_long_term_horizon_words() -> None:
     assert LLMOrchestrator._infer_bias("Defined-Risk Iron Condor", "") == "NEUTRAL"
 
 
+def test_infer_bias_reads_bull_put_credit_spread_as_bullish() -> None:
+    """A Bull Put Credit Spread is bullish despite containing "put" — the
+    bearish pattern's bare `puts?` match must not win over an explicit "bull"
+    in the same strategy name.
+    """
+    assert LLMOrchestrator._infer_bias("Bull Put Credit Spread", "") == "BULLISH"
+    assert LLMOrchestrator._infer_bias("Bear Call Credit Spread", "") == "BEARISH"
+
+
 # --------------------------------------------------------------------------
 # Fix 8 — a bare confirmation word must not force a plan on its own
 # --------------------------------------------------------------------------

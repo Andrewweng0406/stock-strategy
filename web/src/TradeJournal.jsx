@@ -88,6 +88,9 @@ function isCreditStrategy(strategyType) {
 function inferDirection(strategyType) {
   const text = String(strategyType || "").toLowerCase();
   if (/(iron\s*condor|butterfly|calendar)/i.test(text)) return "NEUTRAL";
+  // "bull" must be checked before the generic short/put match below — a
+  // Bull Put Credit Spread is bullish despite containing "put".
+  if (/bull/i.test(text)) return "LONG";
   if (/(bear|put|short|sell|covered\s*call|cash[-\s]?secured)/i.test(text)) return "SHORT";
   return "LONG";
 }
