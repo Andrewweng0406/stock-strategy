@@ -202,6 +202,24 @@ def test_system_prompt_forbids_reusing_stale_numbers_from_earlier_turns() -> Non
     assert "Never repeat, reuse, or extrapolate a number from your own" in prompt
 
 
+def test_system_prompt_marks_stale_gex_context_as_not_live() -> None:
+    orchestrator = LLMOrchestrator(None, "test-model", 250)
+    risk = RiskProfile(
+        gex_status=GEXStatus.NEG_GAMMA,
+        volatility_regime="HIGH_VOL_TRENDING",
+        risk_level="HIGH",
+        warnings=["High risk/high volatility; accelerated theta decay."],
+        locked_warning=True,
+    )
+    summary = gex_summary().model_copy(update={"is_stale": True})
+    prompt = orchestrator._instructions(summary, risk, 5)
+    context_json = prompt.split("<context>", 1)[1].split("</context>", 1)[0]
+    context = json.loads(context_json)
+
+    assert context["gex_summary"]["is_stale"] is True
+    assert "must not call them live/current" in prompt
+
+
 def test_system_prompt_requires_mechanical_dealer_hedging_scenario_not_intent() -> None:
     """User asked for a sharp scenario read of dealer hedging behavior into
     expiration (mean-reverting under POS_GAMMA, momentum-amplifying under

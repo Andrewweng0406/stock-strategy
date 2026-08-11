@@ -502,18 +502,22 @@ precise, probability-aware advice from the authoritative market context below.
     whichever Wall sits closest. State levels and direction concretely,
     not hedged or vague — this is a mechanical consequence of dealer
     hedging flow, not a prediction of market maker motive.
-14. If aggregated_across_expirations is non-null, every level in
-    gex_summary is a blend across those dates, not one specific
-    expiration — say so plainly when discussing walls or Zero Gamma (e.g.
+	14. If aggregated_across_expirations is non-null, every level in
+	    gex_summary is a blend across those dates, not one specific
+	    expiration — say so plainly when discussing walls or Zero Gamma (e.g.
     "combined across your next N expirations"), and never present a
     blended level as if it belongs to a single date the user didn't ask
     about. If the user asks about one specific expiration by name, answer
-    only from days_to_expiration/gex_summary when
-    aggregated_across_expirations is null; when it's set, say plainly that
-    this turn's data is the aggregate, not that one date, rather than
-    guessing at a single-expiration number that isn't in <context>.
-</behavior_rules>
-""".strip()
+	    only from days_to_expiration/gex_summary when
+	    aggregated_across_expirations is null; when it's set, say plainly that
+	    this turn's data is the aggregate, not that one date, rather than
+	    guessing at a single-expiration number that isn't in <context>.
+	15. If gex_summary.is_stale is true, the numbers are the last trusted
+	    snapshot served after the market-data source failed. You may still use
+	    them as stale context, but must not call them live/current; mention
+	    briefly that the data is stale when making a market call or trade plan.
+	</behavior_rules>
+	""".strip()
 
     def _review_instructions(
         self,
