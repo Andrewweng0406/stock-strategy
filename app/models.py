@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -354,6 +354,15 @@ class TradeClose(StrictModel):
     exit_date: datetime
     pnl: float
     notes: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def exit_date_cannot_be_future(self) -> "TradeClose":
+        exit_date = self.exit_date
+        if exit_date.tzinfo is None:
+            exit_date = exit_date.replace(tzinfo=timezone.utc)
+        if exit_date > datetime.now(timezone.utc) + timedelta(seconds=60):
+            raise ValueError("exit_date cannot be in the future")
+        return self
 
 
 class TradeList(StrictModel):

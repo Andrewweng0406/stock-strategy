@@ -321,6 +321,27 @@ def test_create_trade_requires_expiration_date(monkeypatch) -> None:
     assert response.status_code == 422
 
 
+def test_create_trade_rejects_future_entry_date(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTFUTENTRY")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-future-entry",
+                "ticker": "TJTESTFUTENTRY",
+                "strategy_type": "Long Call",
+                "entry_price": 1.25,
+                "position_size": 1,
+                "entry_date": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "expiration_date": _default_expiration_date(offset_days=30),
+                "option_type": "CALL",
+                "strike_price": 100.0,
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "entry_date cannot be in the future"
+
+
 def test_create_trade_derives_snapshot_dte_from_expiration_date(monkeypatch) -> None:
     """The entry GEX snapshot's DTE must come from expiration_date alone —
     there is no separate days_to_expiration field to drift out of sync with
@@ -457,6 +478,22 @@ def test_close_trade_rejects_exit_before_entry(monkeypatch) -> None:
         )
     assert response.status_code == 400
     assert response.json()["detail"] == "exit_date cannot be before entry_date"
+
+
+def test_close_trade_rejects_future_exit_date(monkeypatch) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTFUTEXIT")
+        trade = _create_trade(client, "user-future-exit", "TJTESTFUTEXIT")
+        response = client.put(
+            f"/api/v1/trades/{trade['id']}?user_id=user-future-exit",
+            json={
+                "exit_price": 120.0,
+                "exit_date": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "pnl": 2000.0,
+            },
+        )
+    assert response.status_code == 422
+    assert "exit_date cannot be in the future" in response.text
 
 
 def test_close_trade_rejects_pnl_that_disagrees_with_the_fill(monkeypatch) -> None:

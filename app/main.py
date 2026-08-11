@@ -3,7 +3,7 @@ import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
@@ -542,6 +542,14 @@ async def save_plan(
 
 @app.post("/api/v1/trades", response_model=Trade)
 async def create_trade(payload: TradeCreate, services: Services) -> Trade:
+    if payload.entry_date is not None:
+        entry_date = payload.entry_date
+        if entry_date.tzinfo is None:
+            entry_date = entry_date.replace(tzinfo=timezone.utc)
+        if entry_date > datetime.now(timezone.utc) + timedelta(seconds=60):
+            raise HTTPException(
+                status_code=400, detail="entry_date cannot be in the future"
+            )
     if payload.source_plan_id is not None:
         # A source_plan_id is the link the post-trade review grades
         # discipline against, so an unverified one is worse than none: it
