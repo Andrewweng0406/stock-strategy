@@ -301,3 +301,21 @@ test("health badge exposes CloudSync status in tooltip", async ({ page }) => {
     /CloudSync: enabled/
   );
 });
+
+test("mobile layout keeps primary panels reachable without horizontal overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installTerminalStub(page);
+
+  await page.goto("/");
+
+  await expect(page.getByText("AI Copilot 已連接後端")).toBeVisible();
+  await page.getByRole("button", { name: /GEX 籌碼/ }).click();
+  await expect(page.getByText("Net GEX", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /交易計畫/ }).click();
+  await expect(page.getByText("Trade Plan Notebook")).toBeVisible();
+
+  const overflowPx = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth
+  );
+  expect(overflowPx).toBeLessThanOrEqual(1);
+});
