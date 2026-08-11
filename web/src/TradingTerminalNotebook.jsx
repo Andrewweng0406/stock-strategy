@@ -480,7 +480,7 @@ export default function TradingTerminalNotebook() {
     setGexLoading(true);
     setExpirationsLoading(true);
     setExpirationsError(null);
-    fetch(`${BASE_URL}/api/v1/expirations/${ticker}`)
+    fetch(`${BASE_URL}/api/v1/expirations/${pathSegment(ticker)}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -511,7 +511,7 @@ export default function TradingTerminalNotebook() {
     let cancelled = false;
     setGexHistory([]);
     setGexHistoryError(null);
-    fetch(`${BASE_URL}/api/v1/gex/${ticker}/history?limit=30`)
+    fetch(apiUrl(`/api/v1/gex/${pathSegment(ticker)}/history`, { limit: 30 }))
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -542,12 +542,15 @@ export default function TradingTerminalNotebook() {
     setGexLoading(true);
     setGexError(null);
     const url = aggregateMode
-      ? `${BASE_URL}/api/v1/gex/${ticker}/aggregate?` +
-        expirations
-          .slice(0, MAX_AGGREGATE_EXPIRATIONS)
-          .map((e) => `expirations=${e.date}`)
-          .join("&")
-      : `${BASE_URL}/api/v1/gex/${ticker}?days_to_expiration=${dte}`;
+      ? apiUrl(
+          `/api/v1/gex/${pathSegment(ticker)}/aggregate`,
+          {
+            expirations: expirations
+              .slice(0, MAX_AGGREGATE_EXPIRATIONS)
+              .map((e) => e.date),
+          }
+        )
+      : apiUrl(`/api/v1/gex/${pathSegment(ticker)}`, { days_to_expiration: dte });
     fetch(url)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));

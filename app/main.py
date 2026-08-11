@@ -278,6 +278,10 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+TickerPath = Annotated[
+    str,
+    Path(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
+]
 UserIdQuery = Annotated[str, Query(min_length=1, max_length=128)]
 UserIdPath = Annotated[str, Path(min_length=1, max_length=128)]
 ConversationIdPath = Annotated[str, Path(min_length=1, max_length=128)]
@@ -299,7 +303,7 @@ async def health(services: Services) -> HealthResponse:
 
 @app.get("/api/v1/gex/{ticker}", response_model=OptionGEXSummary)
 async def get_gex(
-    ticker: str,
+    ticker: TickerPath,
     services: Services,
     days_to_expiration: int = Query(default=30, ge=0, le=730),
 ) -> OptionGEXSummary:
@@ -307,14 +311,14 @@ async def get_gex(
 
 
 @app.get("/api/v1/expirations/{ticker}", response_model=ExpirationList)
-async def get_expirations(ticker: str, services: Services) -> ExpirationList:
+async def get_expirations(ticker: TickerPath, services: Services) -> ExpirationList:
     expirations = await services.gex_service.get_expirations(ticker)
     return ExpirationList(ticker=ticker.strip().upper(), expirations=expirations)
 
 
 @app.get("/api/v1/gex/{ticker}/aggregate", response_model=OptionGEXSummary)
 async def get_gex_aggregate(
-    ticker: str,
+    ticker: TickerPath,
     services: Services,
     # Each expiration costs one get_option_chain call; Moomoo/Futu caps that
     # endpoint at 10/30s, so this stays well under it even with other chain
@@ -326,7 +330,7 @@ async def get_gex_aggregate(
 
 @app.get("/api/v1/gex/{ticker}/history", response_model=GEXSnapshotList)
 async def get_gex_history(
-    ticker: str,
+    ticker: TickerPath,
     services: Services,
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> GEXSnapshotList:

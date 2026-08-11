@@ -197,6 +197,21 @@ test("ticker switch waits for that ticker's expirations before requesting GEX", 
   expect(requests).not.toContain("/api/v1/gex/TSLA?days_to_expiration=11");
 });
 
+test("ticker paths support common dotted symbols", async ({ page }) => {
+  const requests = [];
+  await installTerminalStub(page, {
+    expirationsByTicker: { AAPL: aaplExpirations, "BRK.B": tslaExpirations },
+    onRequest: (url) => requests.push(url.pathname),
+  });
+
+  await page.goto("/");
+  await switchTicker(page, "BRK.B");
+
+  await expect.poll(() => requests).toContain("/api/v1/expirations/BRK.B");
+  await expect.poll(() => requests).toContain("/api/v1/gex/BRK.B");
+  expect(requests).toContain("/api/v1/gex/BRK.B/history");
+});
+
 test("GEX failure clears previous numbers instead of showing stale levels", async ({ page }) => {
   const failGex = new Set(["TSLA"]);
   await installTerminalStub(page, { failGex });
