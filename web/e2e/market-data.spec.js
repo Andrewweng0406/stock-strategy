@@ -70,6 +70,7 @@ async function installTerminalStub(
     expirationsByTicker = { AAPL: aaplExpirations, TSLA: tslaExpirations },
     failExpirations = new Set(),
     failGex = new Set(),
+    gexOverridesByTicker = {},
     onGexRequest = () => {},
     onChatRequest = () => {},
     onAggregateRequest = () => {},
@@ -137,7 +138,7 @@ async function installTerminalStub(
         await fulfillJson(route, { detail: `${ticker} GEX unavailable` }, 503);
         return;
       }
-      await fulfillJson(route, summaryFor(ticker));
+      await fulfillJson(route, summaryFor(ticker, gexOverridesByTicker[ticker] || {}));
       return;
     }
     if (url.pathname === "/api/v1/chat" && request.method() === "POST") {
@@ -196,6 +197,34 @@ test("GEX failure clears previous numbers instead of showing stale levels", asyn
   await expect(page.locator("header")).not.toContainText("$225");
   await expect(page.locator("header")).not.toContainText("$240");
   await expect(page.locator("header")).not.toContainText("$215");
+});
+
+test("partial GEX payload renders placeholders instead of crashing", async ({ page }) => {
+  await installTerminalStub(page, {
+    gexOverridesByTicker: {
+      AAPL: {
+        iv_rank: null,
+        zero_gamma: null,
+        call_wall: null,
+        put_wall: null,
+        pinning: {
+          ...baseSummary.pinning,
+          pin_strike: null,
+          distance_pct: null,
+          oi_concentration_pct: null,
+        },
+      },
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("頁面發生錯誤")).not.toBeVisible();
+  await expect(page.getByText("— 無資料 —")).toBeVisible();
+  await expect(page.getByText("IV Rank").locator("..")).toContainText("—");
+  await expect(page.getByText("Pin Strike").locator("..")).toContainText("—");
+  await expect(page.getByText("距離").locator("..")).toContainText("—");
+  await expect(page.getByText("OI 集中度").locator("..")).toContainText("—");
 });
 
 test("chat sends null DTE when the current ticker has no resolved expiration", async ({ page }) => {

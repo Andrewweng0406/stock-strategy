@@ -65,18 +65,22 @@ function fmtExpirationDate(iso) {
 }
 
 function fmtDollar(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  if (!Number.isFinite(n)) return "—";
   return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 function fmtCompactUsd(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  if (!Number.isFinite(n)) return "—";
   const sign = n < 0 ? "-" : "+";
   const abs = Math.abs(n);
   if (abs >= 1e9) return sign + (abs / 1e9).toFixed(2) + "B";
   if (abs >= 1e6) return sign + (abs / 1e6).toFixed(2) + "M";
   if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + "K";
   return sign + abs.toFixed(0);
+}
+
+function fmtPercent(n, digits = 0) {
+  return Number.isFinite(n) ? `${n.toFixed(digits)}%` : "—";
 }
 
 function fmtDateTime(iso) {
@@ -201,7 +205,7 @@ function ChartTooltip({ point, title, lines }) {
 function GexChart({ putWall, zeroGamma, callWall, stockPrice, gexStatus }) {
   const [hover, setHover] = useState(null); // { i, x, y }
 
-  if (putWall == null || zeroGamma == null || callWall == null) {
+  if (![putWall, zeroGamma, callWall].every(Number.isFinite)) {
     return <div className="text-[11px] text-[#57575c] py-6 text-center">— 無資料 —</div>;
   }
   const levels = [
@@ -214,7 +218,7 @@ function GexChart({ putWall, zeroGamma, callWall, stockPrice, gexStatus }) {
     },
     { k: callWall, label: "Call Wall", color: "#2fa37a", note: "後端回傳的 Call Wall" },
   ];
-  if (stockPrice != null) {
+  if (Number.isFinite(stockPrice)) {
     levels.push({ k: stockPrice, label: "Spot", color: "#f0ede5", note: "目前標的價格" });
   }
   levels.sort((a, b) => a.k - b.k);
@@ -914,7 +918,7 @@ export default function TradingTerminalNotebook() {
               <>
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <Stat label="Net GEX" value={fmtCompactUsd(gexData.net_gex)} tone={netGexTone} />
-                  <Stat label="IV Rank" value={`${gexData.iv_rank.toFixed(0)}%`} />
+                  <Stat label="IV Rank" value={fmtPercent(gexData.iv_rank)} />
                 </div>
 
                 <PinningCard pinning={gexData.pinning} />
@@ -1593,8 +1597,8 @@ function PinningCard({ pinning }) {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Stat label="Pin Strike" value={fmtDollar(pinning.pin_strike)} />
-            <Stat label="距離" value={`${pinning.distance_pct.toFixed(2)}%`} />
-            <Stat label="OI 集中度" value={`${pinning.oi_concentration_pct.toFixed(1)}%`} />
+            <Stat label="距離" value={fmtPercent(pinning.distance_pct, 2)} />
+            <Stat label="OI 集中度" value={fmtPercent(pinning.oi_concentration_pct, 1)} />
             <Stat
               label="正 Gamma"
               value={pinning.in_positive_gamma ? "是" : "否"}
