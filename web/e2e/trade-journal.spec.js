@@ -55,7 +55,16 @@ async function installApiStub(
       });
 
     if (url.pathname === "/health") {
-      await json({ status: "ok", market_data_mode: "moomoo" });
+      await json({
+        status: "ok",
+        market_data_mode: "moomoo",
+        cloud_sync: {
+          enabled: false,
+          last_success_at: null,
+          last_error_at: null,
+          last_error: null,
+        },
+      });
       return;
     }
     if (url.pathname === "/api/v1/expirations/AAPL") {

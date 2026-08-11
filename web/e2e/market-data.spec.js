@@ -67,7 +67,12 @@ async function installTerminalStub(
   page,
   {
     healthMode = "moomoo",
-    cloudSync = { enabled: false },
+    cloudSync = {
+      enabled: false,
+      last_success_at: null,
+      last_error_at: null,
+      last_error: null,
+    },
     expirationsByTicker = { AAPL: aaplExpirations, TSLA: tslaExpirations },
     failExpirations = new Set(),
     failGex = new Set(),
