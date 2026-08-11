@@ -67,6 +67,7 @@ async function installTerminalStub(
   page,
   {
     healthMode = "moomoo",
+    cloudSync = { enabled: false },
     expirationsByTicker = { AAPL: aaplExpirations, TSLA: tslaExpirations },
     failExpirations = new Set(),
     failGex = new Set(),
@@ -85,7 +86,11 @@ async function installTerminalStub(
     }
 
     if (url.pathname === "/health") {
-      await fulfillJson(route, { status: "ok", market_data_mode: healthMode });
+      await fulfillJson(route, {
+        status: "ok",
+        market_data_mode: healthMode,
+        cloud_sync: cloudSync,
+      });
       return;
     }
     if (url.pathname === "/api/v1/conversations") {
@@ -277,3 +282,22 @@ for (const [mode, label] of [
     await expect(page.getByText(label)).toBeVisible();
   });
 }
+
+test("health badge exposes CloudSync status in tooltip", async ({ page }) => {
+  await installTerminalStub(page, {
+    healthMode: "moomoo",
+    cloudSync: {
+      enabled: true,
+      last_success_at: "2026-08-11T06:31:16.061Z",
+      last_error_at: null,
+      last_error: null,
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("已連線至 Moomoo 後端（即時）")).toHaveAttribute(
+    "title",
+    /CloudSync: enabled/
+  );
+});

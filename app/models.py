@@ -175,6 +175,7 @@ class SyncAggregateGexRequest(StrictModel):
 class HealthResponse(StrictModel):
     status: str
     market_data_mode: str
+    cloud_sync: dict[str, str | bool | None] | None = None
 
 
 class ChatMessageRecord(StrictModel):

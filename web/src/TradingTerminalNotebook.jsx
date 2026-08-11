@@ -450,6 +450,7 @@ export default function TradingTerminalNotebook() {
       setHealth({
         state: data.status === "ok" ? "ok" : "error",
         mode: data.market_data_mode,
+        cloudSync: data.cloud_sync || null,
         error: null,
       });
     } catch (err) {
@@ -1533,10 +1534,21 @@ function HealthBadge({ health, baseUrl }) {
     dot = "#d8622b";
     label = "連線失敗";
   }
+  const sync = health.cloudSync;
+  const syncTitle =
+    sync?.enabled
+      ? `CloudSync: enabled${
+          sync.last_success_at ? `, last success ${fmtDateTime(sync.last_success_at)}` : ""
+        }${sync.last_error ? `, last error ${sync.last_error}` : ""}`
+      : "CloudSync: disabled";
   return (
     <span
       className="text-[10px] text-[#8d8d93] flex items-center gap-1.5"
-      title={health.error ? `${baseUrl}: ${health.error}` : `${baseUrl}/health`}
+      title={
+        health.error
+          ? `${baseUrl}: ${health.error}`
+          : `${baseUrl}/health · ${syncTitle}`
+      }
     >
       <i className="w-1.5 h-1.5 rounded-full" style={{ background: dot, boxShadow: `0 0 0 2px ${dot}26` }} />
       {label}

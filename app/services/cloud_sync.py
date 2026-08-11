@@ -1,5 +1,6 @@
 import logging
 from datetime import date
+from datetime import datetime, timezone
 
 import httpx
 
@@ -19,6 +20,27 @@ class CloudSync:
     def __init__(self, url: str, token: str) -> None:
         self.url = url.rstrip("/")
         self.token = token
+        self.last_success_at: datetime | None = None
+        self.last_error_at: datetime | None = None
+        self.last_error: str | None = None
+
+    def status(self) -> dict[str, str | bool | None]:
+        return {
+            "enabled": True,
+            "last_success_at": (
+                self.last_success_at.isoformat() if self.last_success_at else None
+            ),
+            "last_error_at": self.last_error_at.isoformat() if self.last_error_at else None,
+            "last_error": self.last_error,
+        }
+
+    def _record_success(self) -> None:
+        self.last_success_at = datetime.now(timezone.utc)
+        self.last_error = None
+
+    def _record_failure(self, exc: Exception) -> None:
+        self.last_error_at = datetime.now(timezone.utc)
+        self.last_error = f"{exc.__class__.__name__}: {exc}"
 
     async def push(
         self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
@@ -36,7 +58,9 @@ class CloudSync:
                     headers={"X-Sync-Token": self.token},
                 )
                 response.raise_for_status()
-        except Exception:
+            self._record_success()
+        except Exception as exc:
+            self._record_failure(exc)
             logger.warning("Cloud sync push failed for %s", ticker, exc_info=True)
 
     async def push_expirations(
@@ -59,7 +83,9 @@ class CloudSync:
                     headers={"X-Sync-Token": self.token},
                 )
                 response.raise_for_status()
-        except Exception:
+            self._record_success()
+        except Exception as exc:
+            self._record_failure(exc)
             logger.warning(
                 "Cloud sync expirations push failed for %s", ticker, exc_info=True
             )
@@ -91,7 +117,9 @@ class CloudSync:
                     headers={"X-Sync-Token": self.token},
                 )
                 response.raise_for_status()
-        except Exception:
+            self._record_success()
+        except Exception as exc:
+            self._record_failure(exc)
             logger.warning(
                 "Cloud sync aggregate push failed for %s", ticker, exc_info=True
             )

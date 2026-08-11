@@ -270,6 +270,11 @@ async def health(services: Services) -> HealthResponse:
     return HealthResponse(
         status="ok",
         market_data_mode=services.market_data.active_mode,
+        cloud_sync=(
+            services.gex_service.cloud_sync.status()
+            if services.gex_service.cloud_sync
+            else {"enabled": False}
+        ),
     )
 
 
