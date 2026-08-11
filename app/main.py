@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -237,19 +237,33 @@ def _sync_token_is_valid(x_sync_token: str) -> bool:
     )
 
 
+def _attach_security_headers(response: Response) -> Response:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    return response
+
+
 @app.middleware("http")
-async def reject_unauthorized_sync_before_body_validation(request: Request, call_next):
+async def security_and_sync_guard(request: Request, call_next):
     """CloudSync is a write surface. Reject bad tokens before request-body
     validation so unauthenticated callers cannot probe sync payload schemas.
     """
     path = request.url.path
     if path == "/api/v1/sync/gex" or path.startswith("/api/v1/sync/"):
         if not _sync_token_is_valid(request.headers.get("x-sync-token", "")):
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Invalid sync token"},
+            return _attach_security_headers(
+                JSONResponse(
+                    status_code=403,
+                    content={"detail": "Invalid sync token"},
+                )
             )
-    return await call_next(request)
+    response = await call_next(request)
+    return _attach_security_headers(response)
 
 
 @app.exception_handler(MarketDataUnavailableError)
