@@ -186,7 +186,8 @@ test("ticker switch waits for that ticker's expirations before requesting GEX", 
 });
 
 test("GEX failure clears previous numbers instead of showing stale levels", async ({ page }) => {
-  await installTerminalStub(page, { failGex: new Set(["TSLA"]) });
+  const failGex = new Set(["TSLA"]);
+  await installTerminalStub(page, { failGex });
 
   await page.goto("/");
   await expect(page.locator("header")).toContainText("$225");
@@ -197,6 +198,11 @@ test("GEX failure clears previous numbers instead of showing stale levels", asyn
   await expect(page.locator("header")).not.toContainText("$225");
   await expect(page.locator("header")).not.toContainText("$240");
   await expect(page.locator("header")).not.toContainText("$215");
+
+  failGex.delete("TSLA");
+  await page.getByRole("button", { name: "重試 GEX" }).click();
+  await expect(page.locator("header")).toContainText("$330.25");
+  await expect(page.getByText("TSLA GEX 資料載入失敗")).not.toBeVisible();
 });
 
 test("partial GEX payload renders placeholders instead of crashing", async ({ page }) => {

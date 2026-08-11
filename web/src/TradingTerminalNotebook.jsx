@@ -379,6 +379,7 @@ export default function TradingTerminalNotebook() {
   const [gexData, setGexData] = useState(null);
   const [gexLoading, setGexLoading] = useState(false);
   const [gexError, setGexError] = useState(null);
+  const [gexRefreshKey, setGexRefreshKey] = useState(0);
   const [gexHistory, setGexHistory] = useState([]);
   const [gexHistoryError, setGexHistoryError] = useState(null);
 
@@ -568,7 +569,7 @@ export default function TradingTerminalNotebook() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker, selectedDate, aggregateMode, expirations, expirationsTicker]);
+  }, [ticker, selectedDate, aggregateMode, expirations, expirationsTicker, gexRefreshKey]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -913,6 +914,16 @@ export default function TradingTerminalNotebook() {
                 <div className="text-[9.5px] text-[#57575c] mt-1.5">
                   為避免誤導，這裡不會保留上一次查詢的數字。
                 </div>
+                {gexError && (
+                  <button
+                    type="button"
+                    onClick={() => setGexRefreshKey((v) => v + 1)}
+                    className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-[rgba(201,161,92,.35)] bg-[rgba(201,161,92,.08)] text-[#c9a15c] text-[10.5px] font-semibold hover:bg-[rgba(201,161,92,.16)] transition-colors"
+                  >
+                    <RefreshCw size={11} />
+                    重試 GEX
+                  </button>
+                )}
               </div>
             ) : (
               <>
