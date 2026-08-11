@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
@@ -264,6 +264,10 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+UserIdQuery = Annotated[str, Query(min_length=1, max_length=128)]
+UserIdPath = Annotated[str, Path(min_length=1, max_length=128)]
+ConversationIdPath = Annotated[str, Path(min_length=1, max_length=128)]
+TradeIdPath = Annotated[str, Path(min_length=1, max_length=64)]
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -388,7 +392,9 @@ async def chat(
 
 
 @app.get("/api/v1/conversations", response_model=ConversationList)
-async def list_conversations(user_id: str, services: Services) -> ConversationList:
+async def list_conversations(
+    user_id: UserIdQuery, services: Services
+) -> ConversationList:
     conversations = await services.chat_repository.list_conversations(user_id)
     return ConversationList(conversations=conversations)
 
@@ -398,26 +404,26 @@ async def list_conversations(user_id: str, services: Services) -> ConversationLi
     response_model=ConversationMessages,
 )
 async def get_conversation_messages(
-    conversation_id: str, user_id: str, services: Services
+    conversation_id: ConversationIdPath, user_id: UserIdQuery, services: Services
 ) -> ConversationMessages:
     return await services.chat_repository.get_messages(conversation_id, user_id)
 
 
 @app.get("/api/v1/plans", response_model=PlanList)
-async def list_plans(user_id: str, services: Services) -> PlanList:
+async def list_plans(user_id: UserIdQuery, services: Services) -> PlanList:
     plans = await services.plan_repository.list_plans(user_id)
     return PlanList(plans=plans)
 
 
 @app.get("/api/v1/profile/{user_id}", response_model=UserProfile)
-async def get_profile(user_id: str, services: Services) -> UserProfile:
+async def get_profile(user_id: UserIdPath, services: Services) -> UserProfile:
     profile = await services.profile_repository.get_profile(user_id)
     return profile or UserProfile(user_id=user_id)
 
 
 @app.put("/api/v1/profile/{user_id}", response_model=UserProfile)
 async def update_profile(
-    user_id: str, payload: UserProfileUpdate, services: Services
+    user_id: UserIdPath, payload: UserProfileUpdate, services: Services
 ) -> UserProfile:
     return await services.profile_repository.upsert_profile(user_id, payload)
 
@@ -560,7 +566,7 @@ async def create_trade(payload: TradeCreate, services: Services) -> Trade:
 
 @app.get("/api/v1/trades", response_model=TradeList)
 async def list_trades(
-    user_id: str,
+    user_id: UserIdQuery,
     services: Services,
     ticker: str | None = None,
     status: TradeStatus | None = None,
@@ -573,7 +579,10 @@ async def list_trades(
 
 @app.put("/api/v1/trades/{trade_id}", response_model=Trade)
 async def close_trade(
-    trade_id: str, user_id: str, payload: TradeClose, services: Services
+    trade_id: TradeIdPath,
+    user_id: UserIdQuery,
+    payload: TradeClose,
+    services: Services,
 ) -> Trade:
     try:
         return await services.trade_repository.close_trade(
@@ -595,8 +604,8 @@ async def close_trade(
 @limiter.limit(settings.chat_rate_limit)
 async def review_trade(
     request: Request,
-    trade_id: str,
-    user_id: str,
+    trade_id: TradeIdPath,
+    user_id: UserIdQuery,
     services: Services,
     # Every call here is a real OpenAI completion. A double-click or a naive
     # retry after a network hiccup would otherwise buy a second identical
@@ -663,7 +672,7 @@ async def review_trade(
 
 @app.get("/api/v1/trades/{trade_id}/review", response_model=TradeReview | None)
 async def get_trade_review(
-    trade_id: str, user_id: str, services: Services
+    trade_id: TradeIdPath, user_id: UserIdQuery, services: Services
 ) -> TradeReview | None:
     trade = await services.trade_repository.get_trade(trade_id)
     if trade is None:
