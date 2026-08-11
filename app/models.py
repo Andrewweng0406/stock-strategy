@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -33,6 +33,12 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+TickerSymbol = Annotated[
+    str,
+    Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
+]
+
+
 class PinningAnalysis(StrictModel):
     pin_strike: float = Field(gt=0)
     pin_strike_matches_max_pain: bool
@@ -46,7 +52,7 @@ class PinningAnalysis(StrictModel):
 
 
 class OptionGEXSummary(StrictModel):
-    ticker: str
+    ticker: TickerSymbol
     stock_price: float = Field(gt=0)
     # Nullable on purpose. zero_gamma is None when the gamma profile never
     # crosses zero inside the searched window (there is simply no such
@@ -83,7 +89,7 @@ class UserTradePlan(StrictModel):
     plan_id: UUID
     user_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     strategy_type: str = Field(min_length=1, max_length=128)
     entry_price: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
@@ -98,7 +104,7 @@ class UserTradePlan(StrictModel):
 
 
 class TradePlanToolArguments(StrictModel):
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     strategy_type: str = Field(min_length=1, max_length=128)
     entry_price: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
@@ -115,7 +121,7 @@ class ChatMessage(StrictModel):
 class ChatContext(StrictModel):
     user_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     days_to_expiration: int | None = Field(default=None, ge=0, le=730)
     # When the GEX panel is in Aggregate mode, the numbers on screen are
     # combined across expiration_dates (up to the same 6-expiration cap the
@@ -151,23 +157,23 @@ class ExpirationInfo(StrictModel):
 
 
 class ExpirationList(StrictModel):
-    ticker: str
+    ticker: TickerSymbol
     expirations: list[ExpirationInfo]
 
 
 class SyncGexRequest(StrictModel):
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     days_to_expiration: int = Field(ge=0, le=730)
     summary: OptionGEXSummary
 
 
 class SyncExpirationsRequest(StrictModel):
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     expirations: list[ExpirationInfo] = Field(max_length=100)
 
 
 class SyncAggregateGexRequest(StrictModel):
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     expiration_dates: list[date] = Field(min_length=1, max_length=6)
     summary: OptionGEXSummary
 
@@ -254,7 +260,7 @@ class TradeLeg(StrictModel):
 class Trade(StrictModel):
     id: UUID
     user_id: str = Field(min_length=1, max_length=128)
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     strategy_type: str = Field(min_length=1, max_length=128)
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
@@ -281,7 +287,7 @@ class Trade(StrictModel):
 
 class TradeCreate(StrictModel):
     user_id: str = Field(min_length=1, max_length=128)
-    ticker: str = Field(min_length=1, max_length=32)
+    ticker: TickerSymbol
     strategy_type: str = Field(min_length=1, max_length=128)
     direction: TradeDirection = TradeDirection.LONG
     credit_debit: TradeCreditDebit = TradeCreditDebit.DEBIT
@@ -351,7 +357,7 @@ class TradeReviewToolArguments(StrictModel):
 
 
 class GEXSnapshot(StrictModel):
-    ticker: str
+    ticker: TickerSymbol
     days_to_expiration: int
     captured_at: datetime
     underlying_price: float
@@ -367,7 +373,7 @@ class GEXSnapshot(StrictModel):
 
 
 class GEXSnapshotList(StrictModel):
-    ticker: str
+    ticker: TickerSymbol
     snapshots: list[GEXSnapshot]
 
 
