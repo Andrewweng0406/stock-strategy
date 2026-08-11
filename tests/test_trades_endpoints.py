@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from app.analytics import market_today
 from app.config import settings
 from app.main import app
+from app.market_data import MarketDataUnavailableError
+from app.services.gex_service import GEXService
 
 
 def _default_expiration_date(offset_days: int = 30) -> str:
@@ -87,6 +89,20 @@ def test_create_trade_writes_entry_snapshot_and_defaults_to_open(monkeypatch) ->
     assert trade["option_type"] == "CALL"
     assert trade["strike_price"] == 100.0
     assert trade["legs"] == []
+
+
+def test_create_trade_still_records_when_entry_gex_snapshot_unavailable(monkeypatch) -> None:
+    async def unavailable_summary(self, ticker: str, days_to_expiration: int):
+        raise MarketDataUnavailableError("market data temporarily unavailable")
+
+    monkeypatch.setattr(GEXService, "get_summary", unavailable_summary)
+
+    with TestClient(app) as client:
+        trade = _create_trade(client, "user-gex-down", "TJTESTNOGEX")
+
+    assert trade["status"] == "OPEN"
+    assert trade["entry_gex_snapshot_id"] is None
+    assert trade["ticker"] == "TJTESTNOGEX"
 
 
 def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -> None:

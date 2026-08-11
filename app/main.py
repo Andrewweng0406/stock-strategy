@@ -86,6 +86,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -529,14 +530,23 @@ async def create_trade(payload: TradeCreate, services: Services) -> Trade:
     days_to_expiration = max(
         0, min(730, (payload.expiration_date - market_today()).days)
     )
-    summary = await services.gex_service.get_summary(
-        payload.ticker, days_to_expiration
-    )
     entry_gex_snapshot_id = None
     if services.market_data.active_mode != "mock":
-        entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
-            payload.ticker.strip().upper(), days_to_expiration, summary
-        )
+        try:
+            summary = await services.gex_service.get_summary(
+                payload.ticker, days_to_expiration
+            )
+        except MarketDataUnavailableError:
+            logger.warning(
+                "Creating trade without entry GEX snapshot for %s %sDTE",
+                payload.ticker,
+                days_to_expiration,
+                exc_info=True,
+            )
+        else:
+            entry_gex_snapshot_id = await services.snapshot_repository.save_snapshot(
+                payload.ticker.strip().upper(), days_to_expiration, summary
+            )
     return await services.trade_repository.create_trade(
         payload, entry_gex_snapshot_id
     )
