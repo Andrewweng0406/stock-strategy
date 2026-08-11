@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.cache import InMemoryCache
+from app.market_data import MarketDataUnavailableError
 from app.models import (
     ExpirationInfo,
     ExpirationType,
@@ -38,6 +39,8 @@ def _fake_summary(ticker: str = "AAPL") -> OptionGEXSummary:
 class _FakeMarketData:
     def __init__(self, active_mode: str) -> None:
         self.active_mode = active_mode
+        self.fail_summary = False
+        self.fail_aggregate = False
 
     async def get_available_expirations(self, ticker: str) -> list[ExpirationInfo]:
         return [
@@ -45,9 +48,13 @@ class _FakeMarketData:
         ]
 
     async def get_gex_summary(self, ticker: str, days_to_expiration: int):
+        if self.fail_summary:
+            raise MarketDataUnavailableError("rate limited")
         return _fake_summary(ticker)
 
     async def get_gex_summary_multi(self, ticker: str, expiration_dates: list[date]):
+        if self.fail_aggregate:
+            raise MarketDataUnavailableError("rate limited")
         return _fake_summary(ticker)
 
 
@@ -209,6 +216,70 @@ async def test_get_summary_uses_prior_wall_for_breakout_detection() -> None:
     assert summary.pinning.has_broken_wall is True
     assert summary.pinning.regime == "BREAKOUT"
     assert repo.saved[0][2].pinning.regime == "BREAKOUT"
+
+
+@pytest.mark.asyncio
+async def test_get_summary_serves_stale_trusted_payload_after_market_data_failure() -> None:
+    market_data = _FakeMarketData("yfinance")
+    service = GEXService(
+        market_data=market_data,
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        stale_ttl_seconds=60,
+    )
+
+    fresh = await service.get_summary("AAPL", 6)
+    market_data.fail_summary = True
+    stale = await service._refresh("AAPL", 6)
+
+    assert fresh.is_stale is False
+    assert stale.is_stale is True
+    assert stale.ticker == "AAPL"
+    assert stale.stock_price == fresh.stock_price
+
+
+@pytest.mark.asyncio
+async def test_get_summary_still_fails_without_stale_payload() -> None:
+    market_data = _FakeMarketData("yfinance")
+    market_data.fail_summary = True
+    service = GEXService(
+        market_data=market_data,
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        stale_ttl_seconds=60,
+    )
+
+    with pytest.raises(MarketDataUnavailableError):
+        await service._refresh("AAPL", 6)
+
+
+@pytest.mark.asyncio
+async def test_get_aggregate_summary_serves_stale_payload_after_failure() -> None:
+    market_data = _FakeMarketData("yfinance")
+    service = GEXService(
+        market_data=market_data,
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        aggregate_ttl_seconds=1,
+        stale_ttl_seconds=60,
+    )
+    dates = [date(2026, 8, 14), date(2026, 8, 21)]
+
+    fresh = await service.get_aggregate_summary("AAPL", dates)
+    market_data.fail_aggregate = True
+    stale = await service.get_aggregate_summary("AAPL", dates)
+
+    assert fresh.is_stale is False
+    assert stale.is_stale is False  # still a fresh-cache hit before ttl expiry
+
+    service.cache = InMemoryCache()
+    await service.cache.set_stale(
+        "gex:agg:v1:AAPL:2026-08-14,2026-08-21",
+        fresh.model_dump_json(),
+        ttl=60,
+    )
+    stale_after_miss = await service.get_aggregate_summary("AAPL", dates)
+    assert stale_after_miss.is_stale is True
 
 
 @pytest.mark.asyncio

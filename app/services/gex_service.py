@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 
 from app.cache import ResilientCache
 from app.database import GEXSnapshotRepository
-from app.market_data import MarketDataClient
+from app.market_data import MarketDataClient, MarketDataUnavailableError
 from app.models import ExpirationInfo, OptionGEXSummary, PinningRegime
 from app.services.cloud_sync import CloudSync
 
@@ -30,6 +30,7 @@ class GEXService:
         snapshot_repository: GEXSnapshotRepository | None = None,
         snapshot_interval_seconds: int = 3600,
         aggregate_ttl_seconds: int | None = None,
+        stale_ttl_seconds: int = 900,
     ) -> None:
         self.market_data = market_data
         self.cache = cache
@@ -44,6 +45,7 @@ class GEXService:
         # still being warm on the cloud side. Defaults to ttl_seconds when
         # not given explicitly.
         self.aggregate_ttl_seconds = aggregate_ttl_seconds if aggregate_ttl_seconds is not None else ttl_seconds
+        self.stale_ttl_seconds = stale_ttl_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # (ticker, days_to_expiration) -> monotonic time last requested by a
         # real caller. Drives the background poller — only tickers/expiries
@@ -114,8 +116,25 @@ class GEXService:
         cached = await self.cache.get(key)
         if cached:
             return OptionGEXSummary.model_validate_json(cached)
-        summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
+        try:
+            summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
+        except MarketDataUnavailableError:
+            stale = await self.cache.get_stale(key)
+            if stale is None:
+                raise
+            logger.warning(
+                "Serving stale aggregate GEX summary for %s/%s after market-data failure",
+                ticker,
+                dates_key,
+            )
+            return OptionGEXSummary.model_validate_json(stale).model_copy(
+                update={"is_stale": True}
+            )
+        summary = summary.model_copy(update={"is_stale": False})
         await self.cache.set(key, summary.model_dump_json(), self.aggregate_ttl_seconds)
+        await self.cache.set_stale(
+            key, summary.model_dump_json(), self.stale_ttl_seconds
+        )
         if self.cloud_sync and self.market_data.active_mode == "moomoo":
             asyncio.create_task(
                 self._push_aggregate_to_cloud(ticker, sorted_dates, summary)
@@ -150,12 +169,29 @@ class GEXService:
         trusted local market-data source, fire off a cloud sync push. Shared by
         the request path's cache-miss branch and the background poller.
         """
-        summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
+        key = self._cache_key(ticker, days_to_expiration)
+        try:
+            summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
+        except MarketDataUnavailableError:
+            stale = await self.cache.get_stale(key)
+            if stale is None:
+                raise
+            logger.warning(
+                "Serving stale GEX summary for %s/%sDTE after market-data failure",
+                ticker,
+                days_to_expiration,
+            )
+            return OptionGEXSummary.model_validate_json(stale).model_copy(
+                update={"is_stale": True}
+            )
         summary = await self._apply_prior_wall_breakout(
             ticker, days_to_expiration, summary
         )
-        key = self._cache_key(ticker, days_to_expiration)
+        summary = summary.model_copy(update={"is_stale": False})
         await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
+        await self.cache.set_stale(
+            key, summary.model_dump_json(), self.stale_ttl_seconds
+        )
         if self.market_data.active_mode == "moomoo":
             if self.cloud_sync:
                 asyncio.create_task(

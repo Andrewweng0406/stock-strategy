@@ -178,6 +178,7 @@ async def lifespan(app: FastAPI):
         snapshot_repository,
         settings.snapshot_interval_seconds,
         settings.aggregate_cache_ttl_seconds,
+        settings.gex_stale_cache_ttl_seconds,
     )
     app.state.services = AppServices(
         engine=engine,

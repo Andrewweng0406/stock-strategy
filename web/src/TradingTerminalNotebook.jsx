@@ -111,6 +111,13 @@ function marketDataQuality(summary) {
       color: "#d8622b",
     };
   }
+  if (summary.is_stale) {
+    return {
+      label: "Stale 快照",
+      detail: "資料源暫時不可用，顯示最後一筆可信市場資料",
+      color: "#d8b06c",
+    };
+  }
   if (source === "MOOMOO") {
     return {
       label: "Moomoo 即時",

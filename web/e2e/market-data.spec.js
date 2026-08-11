@@ -298,6 +298,25 @@ test("GEX panel warns when payload is synthetic", async ({ page }) => {
   await expect(page.locator('[title="非真實市場資料"]')).toBeVisible();
 });
 
+
+test("GEX panel labels stale trusted snapshots", async ({ page }) => {
+  await installTerminalStub(page, {
+    gexOverridesByTicker: {
+      AAPL: {
+        data_source: "YFINANCE",
+        is_delayed: true,
+        is_synthetic: false,
+        is_stale: true,
+      },
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("Stale 快照")).toBeVisible();
+  await expect(page.locator('[title*="最後一筆可信市場資料"]')).toBeVisible();
+});
+
 test("chat sends null DTE when the current ticker has no resolved expiration", async ({ page }) => {
   let chatPayload = null;
   await installTerminalStub(page, {

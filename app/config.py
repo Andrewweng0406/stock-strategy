@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # a synced aggregate view stays real for as long as a ticker would stay
     # "active" anyway.
     aggregate_cache_ttl_seconds: int = 300
+    # Longer-lived trusted cache used only when the real/delayed market-data
+    # source temporarily fails (e.g. yfinance rate limit). It is explicitly
+    # marked is_stale=true in the API response and never replaced by mock data.
+    gex_stale_cache_ttl_seconds: int = 900
 
     # /api/v1/chat is the only endpoint that spends real OpenAI budget per
     # call; cap it per client IP so a bug or abusive client can't run up the

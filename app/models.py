@@ -78,6 +78,7 @@ class OptionGEXSummary(StrictModel):
     data_source: MarketDataSource = MarketDataSource.UNKNOWN
     is_delayed: bool = False
     is_synthetic: bool = False
+    is_stale: bool = False
     calculated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
