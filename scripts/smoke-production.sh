@@ -43,11 +43,13 @@ if "token" in json.dumps(payload).lower():
 print(f"backend market data mode: {mode}")
 PY
 
-python3 - "$health_headers" <<'PY'
+python3 - "$health_headers" "$BACKEND_URL" <<'PY'
 import sys
+from urllib.parse import urlparse
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     raw = fh.read()
+backend_url = sys.argv[2]
 
 headers = {}
 for line in raw.replace("\r\n", "\n").split("\n"):
@@ -61,7 +63,13 @@ expected = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-site",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
 }
+if urlparse(backend_url).scheme == "https":
+    expected["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
 for header, value in expected.items():
     actual = headers.get(header.lower())
     if actual != value:
