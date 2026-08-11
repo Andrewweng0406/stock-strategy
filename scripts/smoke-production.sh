@@ -86,6 +86,14 @@ missing = [key for key in required if key not in payload]
 if missing:
     raise SystemExit(f"GEX payload missing keys: {missing}")
 
+source = payload.get("data_source")
+if source in {"MOCK", None, ""}:
+    raise SystemExit(f"GEX payload is not production-safe data_source={source!r}")
+if payload.get("is_synthetic") is not False:
+    raise SystemExit(f"GEX payload must explicitly be non-synthetic: {payload.get('is_synthetic')!r}")
+if source == "YFINANCE" and payload.get("is_delayed") is not True:
+    raise SystemExit("YFINANCE payload must explicitly be marked delayed")
+
 price = payload.get("stock_price")
 if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
     raise SystemExit(f"invalid stock_price: {price!r}")
@@ -101,7 +109,7 @@ if not isinstance(pinning, dict) or "score" not in pinning or "regime" not in pi
 print(
     "GEX payload ok: "
     f"{payload.get('ticker')} price={price} net_gex={net_gex} "
-    f"status={payload.get('gex_status')}"
+    f"status={payload.get('gex_status')} source={source}"
 )
 PY
 

@@ -85,6 +85,9 @@ async def test_mock_client_populates_pinning_card() -> None:
     assert summary.pinning is not None
     assert summary.pinning.regime in {"PINNING", "BREAKOUT", "NEUTRAL"}
     assert 0 <= summary.pinning.score <= 100
+    assert summary.data_source == "MOCK"
+    assert summary.is_synthetic is True
+    assert summary.is_delayed is False
 
 
 @pytest.mark.asyncio
@@ -186,6 +189,8 @@ async def test_fallback_client_can_use_mock_for_explicit_demo_mode() -> None:
 
     assert summary.ticker == "AAPL"
     assert client.active_mode == "mock"
+    assert summary.data_source == "MOCK"
+    assert summary.is_synthetic is True
 
 
 @pytest.mark.asyncio
@@ -243,6 +248,9 @@ async def test_yfinance_client_computes_gex_summary_from_option_chain() -> None:
     assert summary.ticker == "AAPL"
     assert summary.stock_price == 100.0
     assert summary.pinning is not None
+    assert summary.data_source == "YFINANCE"
+    assert summary.is_delayed is True
+    assert summary.is_synthetic is False
 
 
 @pytest.mark.asyncio
@@ -347,3 +355,6 @@ async def test_yfinance_client_aggregate_combines_multiple_expirations() -> None
 
     assert summary.stock_price == 100.0
     assert handle.option_chain.call_count == 2
+    assert summary.data_source == "YFINANCE"
+    assert summary.is_delayed is True
+    assert summary.is_synthetic is False

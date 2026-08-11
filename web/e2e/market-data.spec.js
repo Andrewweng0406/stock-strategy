@@ -11,6 +11,9 @@ const baseSummary = {
   iv_rank: 22,
   net_gex: 12345678,
   gex_status: "POS_GAMMA",
+  data_source: "MOOMOO",
+  is_delayed: false,
+  is_synthetic: false,
   calculated_at: "2026-08-10T12:00:00Z",
   pinning: {
     pin_strike: 230,
@@ -258,6 +261,41 @@ test("partial GEX payload renders placeholders instead of crashing", async ({ pa
   await expect(page.getByText("Pin Strike").locator("..")).toContainText("—");
   await expect(page.getByText("距離").locator("..")).toContainText("—");
   await expect(page.getByText("OI 集中度").locator("..")).toContainText("—");
+});
+
+test("GEX panel shows the payload market-data source", async ({ page }) => {
+  await installTerminalStub(page, {
+    gexOverridesByTicker: {
+      AAPL: {
+        data_source: "YFINANCE",
+        is_delayed: true,
+        is_synthetic: false,
+      },
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("Yahoo Finance 延遲")).toBeVisible();
+  await expect(page.locator('[title*="15-20 分鐘延遲"]')).toBeVisible();
+});
+
+test("GEX panel warns when payload is synthetic", async ({ page }) => {
+  await installTerminalStub(page, {
+    healthMode: "mock",
+    gexOverridesByTicker: {
+      AAPL: {
+        data_source: "MOCK",
+        is_delayed: false,
+        is_synthetic: true,
+      },
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("Synthetic / Mock")).toBeVisible();
+  await expect(page.locator('[title="非真實市場資料"]')).toBeVisible();
 });
 
 test("chat sends null DTE when the current ticker has no resolved expiration", async ({ page }) => {

@@ -94,11 +94,17 @@ if payload.get("gex_status") not in {"POS_GAMMA", "NEG_GAMMA"}:
     raise SystemExit(f"invalid gex_status: {payload.get('gex_status')!r}")
 if not isinstance(payload.get("pinning"), dict):
     raise SystemExit(f"pinning analysis missing: {payload.get('pinning')!r}")
+if payload.get("data_source") != "MOOMOO":
+    raise SystemExit(f"expected MOOMOO payload data_source, got {payload.get('data_source')!r}")
+if payload.get("is_delayed") is not False:
+    raise SystemExit(f"Moomoo payload must not be delayed: {payload.get('is_delayed')!r}")
+if payload.get("is_synthetic") is not False:
+    raise SystemExit(f"Moomoo payload must not be synthetic: {payload.get('is_synthetic')!r}")
 
 print(
     "Moomoo GEX payload ok: "
     f"{payload.get('ticker')} price={price} net_gex={net_gex} "
-    f"status={payload.get('gex_status')}"
+    f"status={payload.get('gex_status')} source={payload.get('data_source')}"
 )
 PY
 

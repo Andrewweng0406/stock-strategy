@@ -23,6 +23,7 @@ from app.models import (
     ExpirationInfo,
     ExpirationType,
     GEXStatus,
+    MarketDataSource,
     OptionGEXSummary,
     PinningAnalysis,
 )
@@ -100,6 +101,9 @@ class MockMarketDataClient(MarketDataClient):
             iv_rank=float(30 + seed % 60),
             net_gex=float(((seed % 200) - 100) * 1_000_000),
             gex_status=gex_status,
+            data_source=MarketDataSource.MOCK,
+            is_delayed=False,
+            is_synthetic=True,
             pinning=self._mock_pinning(
                 seed, stock_price, call_wall, put_wall, gex_status
             ),
@@ -340,7 +344,14 @@ class MoomooMarketDataClient(MarketDataClient):
                 raise RuntimeError("Option chain did not contain contracts")
             summary = self.calculator.calculate(ticker, stock_price, contracts)
             pinning = compute_pinning_for_contracts(contracts, summary)
-            return summary.model_copy(update={"pinning": pinning})
+            return summary.model_copy(
+                update={
+                    "data_source": MarketDataSource.MOOMOO,
+                    "is_delayed": False,
+                    "is_synthetic": False,
+                    "pinning": pinning,
+                }
+            )
         finally:
             quote_context.close()
 
@@ -377,7 +388,14 @@ class MoomooMarketDataClient(MarketDataClient):
                 raise RuntimeError("Aggregate option chain did not contain contracts")
             summary = self.calculator.calculate(ticker, stock_price, contracts)
             pinning = compute_pinning_for_contracts(contracts, summary)
-            return summary.model_copy(update={"pinning": pinning})
+            return summary.model_copy(
+                update={
+                    "data_source": MarketDataSource.MOOMOO,
+                    "is_delayed": False,
+                    "is_synthetic": False,
+                    "pinning": pinning,
+                }
+            )
         finally:
             quote_context.close()
 
@@ -536,7 +554,14 @@ class YFinanceMarketDataClient(MarketDataClient):
             raise RuntimeError("Option chain did not contain contracts")
         summary = self.calculator.calculate(ticker, stock_price, contracts)
         pinning = compute_pinning_for_contracts(contracts, summary)
-        return summary.model_copy(update={"pinning": pinning})
+        return summary.model_copy(
+            update={
+                "data_source": MarketDataSource.YFINANCE,
+                "is_delayed": True,
+                "is_synthetic": False,
+                "pinning": pinning,
+            }
+        )
 
     def _fetch_expirations_sync(self, ticker: str) -> list[ExpirationInfo]:
         symbol = ticker.strip().upper()
@@ -563,7 +588,14 @@ class YFinanceMarketDataClient(MarketDataClient):
             raise RuntimeError("Aggregate option chain did not contain contracts")
         summary = self.calculator.calculate(ticker, stock_price, contracts)
         pinning = compute_pinning_for_contracts(contracts, summary)
-        return summary.model_copy(update={"pinning": pinning})
+        return summary.model_copy(
+            update={
+                "data_source": MarketDataSource.YFINANCE,
+                "is_delayed": True,
+                "is_synthetic": False,
+                "pinning": pinning,
+            }
+        )
 
     async def get_gex_summary(
         self, ticker: str, days_to_expiration: int

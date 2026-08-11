@@ -101,6 +101,37 @@ function fmtDateTime(iso) {
   });
 }
 
+function marketDataQuality(summary) {
+  if (!summary) return null;
+  const source = summary.data_source || "UNKNOWN";
+  if (summary.is_synthetic || source === "MOCK") {
+    return {
+      label: "Synthetic / Mock",
+      detail: "非真實市場資料",
+      color: "#d8622b",
+    };
+  }
+  if (source === "MOOMOO") {
+    return {
+      label: "Moomoo 即時",
+      detail: "本地 OpenD 真實期權鏈",
+      color: "#2fa37a",
+    };
+  }
+  if (source === "YFINANCE") {
+    return {
+      label: "Yahoo Finance 延遲",
+      detail: "約 15-20 分鐘延遲，希臘值由後端計算",
+      color: "#c9a15c",
+    };
+  }
+  return {
+    label: "資料來源未標記",
+    detail: "舊快取或外部同步資料缺少來源 metadata",
+    color: "#8d8d93",
+  };
+}
+
 /**
  * Detects an "A. ... / B. ... / C. ..." style option list inside an AI
  * reply so it can be rendered as quick-reply buttons. Heuristic and
@@ -815,6 +846,7 @@ export default function TradingTerminalNotebook() {
   }
 
   const netGexTone = gexData?.gex_status === "NEG_GAMMA" ? "bear" : "bull";
+  const gexQuality = marketDataQuality(gexData);
   const gexHistoryChronological = [...gexHistory].reverse();
   const gexHistoryValues = gexHistoryChronological.map((s) => s.net_gex);
   const gexHistoryLabels = gexHistoryChronological.map((s) => fmtDateTime(s.captured_at));
@@ -934,6 +966,24 @@ export default function TradingTerminalNotebook() {
               </div>
             ) : (
               <>
+                {gexQuality && (
+                  <div
+                    className="mb-2.5 flex items-center justify-between gap-2 rounded border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] px-2.5 py-1.5 text-[10px]"
+                    title={gexQuality.detail}
+                  >
+                    <span className="text-[#57575c] uppercase tracking-wide">資料來源</span>
+                    <span className="flex items-center gap-1.5 font-semibold" style={{ color: gexQuality.color }}>
+                      <i
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{
+                          background: gexQuality.color,
+                          boxShadow: `0 0 0 2px ${gexQuality.color}26`,
+                        }}
+                      />
+                      {gexQuality.label}
+                    </span>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <Stat label="Net GEX" value={fmtCompactUsd(gexData.net_gex)} tone={netGexTone} />
                   <Stat label="IV Rank" value={fmtPercent(gexData.iv_rank)} />

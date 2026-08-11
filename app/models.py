@@ -25,6 +25,13 @@ class ExpirationType(str, Enum):
     MONTHLY = "MONTHLY"
 
 
+class MarketDataSource(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    MOOMOO = "MOOMOO"
+    YFINANCE = "YFINANCE"
+    MOCK = "MOCK"
+
+
 class PlanStatus(str, Enum):
     DRAFT = "DRAFT"
     SIGNED = "SIGNED"
@@ -68,6 +75,9 @@ class OptionGEXSummary(StrictModel):
     iv_rank: float = Field(ge=0, le=100)
     net_gex: float
     gex_status: GEXStatus
+    data_source: MarketDataSource = MarketDataSource.UNKNOWN
+    is_delayed: bool = False
+    is_synthetic: bool = False
     calculated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
