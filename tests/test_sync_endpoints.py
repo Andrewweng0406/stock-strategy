@@ -69,6 +69,25 @@ def test_sync_gex_rejects_summary_ticker_mismatch(monkeypatch) -> None:
     )
 
 
+def test_sync_gex_normalizes_cached_summary_ticker(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/v1/sync/gex",
+            json={
+                "ticker": "aapl",
+                "days_to_expiration": 30,
+                "summary": _summary_payload("aapl"),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+        assert sync_response.status_code == 200
+
+        gex_response = client.get("/api/v1/gex/AAPL?days_to_expiration=30")
+    assert gex_response.status_code == 200
+    assert gex_response.json()["ticker"] == "AAPL"
+
+
 def test_sync_expirations_rejects_missing_token() -> None:
     with TestClient(app) as client:
         response = client.post(
@@ -153,6 +172,28 @@ def test_sync_gex_aggregate_rejects_summary_ticker_mismatch(monkeypatch) -> None
     assert response.json()["detail"] == (
         "summary ticker TSLA does not match sync ticker AAPL"
     )
+
+
+def test_sync_gex_aggregate_normalizes_cached_summary_ticker(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "aapl",
+                "expiration_dates": ["2026-08-14", "2026-08-21"],
+                "summary": _summary_payload("aapl"),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+        assert sync_response.status_code == 200
+
+        aggregate_response = client.get(
+            "/api/v1/gex/AAPL/aggregate",
+            params={"expirations": ["2026-08-14", "2026-08-21"]},
+        )
+    assert aggregate_response.status_code == 200
+    assert aggregate_response.json()["ticker"] == "AAPL"
 
 
 def test_sync_gex_aggregate_cache_key_ignores_date_order(monkeypatch) -> None:

@@ -473,9 +473,10 @@ async def sync_gex(
     if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = _require_synced_summary_ticker(payload.ticker, payload.summary)
+    summary = payload.summary.model_copy(update={"ticker": ticker})
     key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
     await services.cache.set(
-        key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
+        key, summary.model_dump_json(), settings.cache_ttl_seconds
     )
     return {"status": "synced"}
 
@@ -520,9 +521,10 @@ async def sync_gex_aggregate(
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = _require_synced_summary_ticker(payload.ticker, payload.summary)
     dates_key = ",".join(d.isoformat() for d in sorted(set(payload.expiration_dates)))
+    summary = payload.summary.model_copy(update={"ticker": ticker})
     key = f"gex:agg:v1:{ticker}:{dates_key}"
     await services.cache.set(
-        key, payload.summary.model_dump_json(), settings.aggregate_cache_ttl_seconds
+        key, summary.model_dump_json(), settings.aggregate_cache_ttl_seconds
     )
     return {"status": "synced"}
 
