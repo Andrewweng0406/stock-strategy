@@ -193,13 +193,18 @@ async function installApiStub(
   });
 }
 
+async function openTradeJournal(page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  const journalButton = page.getByTitle("交易日誌");
+  await expect(journalButton).toBeVisible();
+  await journalButton.click();
+  await expect(page.getByRole("button", { name: /新增交易/ })).toBeVisible();
+}
+
 test("trade journal records and displays option expiration for a new single-leg trade", async ({ page }) => {
   await installApiStub(page);
 
-  await page.goto("/");
-  await page.getByTitle("交易日誌").click();
-
-  await expect(page.getByRole("button", { name: /新增交易/ })).toBeVisible();
+  await openTradeJournal(page);
   await expect(page.locator('input[type="date"]').first()).toHaveValue("2026-08-21");
 
   await page.getByPlaceholder("策略類型（可挑選或自行輸入）").fill("Long Call");
@@ -244,8 +249,7 @@ test("legacy trades without expiration are explicitly marked instead of looking 
     ],
   });
 
-  await page.goto("/");
-  await page.getByTitle("交易日誌").click();
+  await openTradeJournal(page);
 
   const card = page.locator("text=AAPL · Long Put").locator("..").locator("..");
   await expect(card).toContainText("到期未記錄");
@@ -286,8 +290,7 @@ test("single-leg trade can be closed and reviewed with correct debit PnL display
     },
   });
 
-  await page.goto("/");
-  await page.getByTitle("交易日誌").click();
+  await openTradeJournal(page);
 
   const openCard = page.locator("text=AAPL · Long Call").locator("..").locator("..");
   await openCard.getByRole("button", { name: "平倉" }).click();
@@ -336,8 +339,7 @@ test("credit close math uses entry minus exit before applying contract multiplie
   };
   await installApiStub(page, { initialTrades: [trade] });
 
-  await page.goto("/");
-  await page.getByTitle("交易日誌").click();
+  await openTradeJournal(page);
 
   const card = page.locator("text=AAPL · Bull Put Credit Spread").locator("..").locator("..");
   await card.getByRole("button", { name: "平倉" }).click();
@@ -355,8 +357,7 @@ test("multi-leg trade preserves manual direction, credit/debit, and every leg in
     },
   });
 
-  await page.goto("/");
-  await page.getByTitle("交易日誌").click();
+  await openTradeJournal(page);
 
   await page.getByPlaceholder("策略類型（可挑選或自行輸入）").fill("Ratio Spread");
   await page.locator("select").nth(1).selectOption("NEUTRAL");
@@ -412,4 +413,42 @@ test("multi-leg trade preserves manual direction, credit/debit, and every leg in
   await expect(card).toContainText("2 legs");
   await expect(card).toContainText("方向 中性");
   await expect(card).toContainText("資流 Credit");
+});
+
+test("multi-leg entry snapshot date follows the earliest leg expiration", async ({ page }) => {
+  let createPayload = null;
+  await installApiStub(page, {
+    onCreateTrade: (payload) => {
+      createPayload = payload;
+    },
+  });
+
+  await openTradeJournal(page);
+
+  await page.getByPlaceholder("策略類型（可挑選或自行輸入）").fill("Calendar Spread");
+  await page.locator("select").nth(3).selectOption("MULTI_LEG");
+
+  const dateInputs = page.locator('input[type="date"]');
+  await dateInputs.nth(0).fill("2026-08-28");
+  await dateInputs.nth(1).fill("2026-08-21");
+  await dateInputs.nth(2).fill("2026-08-28");
+  await page.getByPlaceholder("Strike").nth(0).fill("450");
+  await page.getByPlaceholder("Strike").nth(1).fill("450");
+  await page.getByPlaceholder("Qty").nth(0).fill("1");
+  await page.getByPlaceholder("Qty").nth(1).fill("1");
+  await page.getByPlaceholder("Price").nth(0).fill("6.00");
+  await page.getByPlaceholder("Price").nth(1).fill("3.50");
+  await page.getByPlaceholder("進場價").fill("2.50");
+
+  await expect(page.locator("text=最早腿到期日 8/21")).toBeVisible();
+  await page.getByRole("button", { name: /新增交易/ }).click();
+
+  expect(createPayload.expiration_date).toBe("2026-08-21");
+  expect(createPayload.legs.map((leg) => leg.expiration_date)).toEqual([
+    "2026-08-21",
+    "2026-08-28",
+  ]);
+
+  const card = page.locator("text=AAPL · Calendar Spread").locator("..").locator("..");
+  await expect(card).toContainText("到期 8/21");
 });

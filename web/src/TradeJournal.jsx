@@ -210,6 +210,14 @@ function defaultLegs(expirationDate = "") {
   ];
 }
 
+function earliestIsoDate(values) {
+  const dates = values
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .sort();
+  return dates[0] || null;
+}
+
 export default function TradeJournalPanel({ userId, ticker, expirationDate, onClose }) {
   const [trades, setTrades] = useState([]);
   const [plans, setPlans] = useState([]);
@@ -378,7 +386,14 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     const strategyValue = draft.strategyType.trim();
     const entryPrice = parsePositiveNumber(draft.entryPrice);
     const positionSize = parsePositiveInt(draft.positionSize);
-    const tradeExpirationDate = draft.expirationDate.trim() || null;
+    const legExpirationDate =
+      draft.optionType === "MULTI_LEG"
+        ? earliestIsoDate(draft.legs.map((leg) => leg.expiration_date))
+        : null;
+    const tradeExpirationDate =
+      draft.optionType === "MULTI_LEG"
+        ? legExpirationDate
+        : draft.expirationDate.trim() || null;
     const strikePrice = parsePositiveNumber(draft.strikePrice);
     let legs = [];
     if (draft.optionType === "MULTI_LEG") {
@@ -397,7 +412,11 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     let validation = null;
     if (!tickerValue) validation = "請輸入股票代號";
     else if (!strategyValue) validation = "請輸入策略類型";
-    else if (!tradeExpirationDate) validation = "請選擇到期日";
+    else if (!tradeExpirationDate)
+      validation =
+        draft.optionType === "MULTI_LEG"
+          ? "請填寫每腿到期日"
+          : "請選擇到期日";
     else if (!draft.optionType) validation = "請選擇 Call/Put 或 Multi-leg";
     else if (draft.optionType !== "MULTI_LEG" && strikePrice === null)
       validation = "履約價必須是大於 0 的數字";
@@ -555,10 +574,16 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
 
   // Disabled only for *visibly* incomplete forms. Filled-but-invalid input
   // (e.g. "abc" in a price) stays clickable so the click can explain itself.
+  const legExpirationDate =
+    draft.optionType === "MULTI_LEG"
+      ? earliestIsoDate(draft.legs.map((leg) => leg.expiration_date))
+      : null;
   const createDisabled =
     !draft.ticker.trim() ||
     !draft.strategyType.trim() ||
-    !draft.expirationDate.trim() ||
+    (draft.optionType === "MULTI_LEG"
+      ? !legExpirationDate
+      : !draft.expirationDate.trim()) ||
     (draft.optionType !== "MULTI_LEG" && !draft.strikePrice.trim()) ||
     (draft.optionType === "MULTI_LEG" &&
       (draft.legs.length < 2 ||
@@ -577,7 +602,10 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
   const tickerOverridden =
     !!draft.ticker.trim() &&
     draft.ticker.trim().toUpperCase() !== (ticker || "").toUpperCase();
-  const effectiveExpirationDate = draft.expirationDate.trim() || null;
+  const effectiveExpirationDate =
+    draft.optionType === "MULTI_LEG"
+      ? legExpirationDate
+      : draft.expirationDate.trim() || null;
 
   // Live math for the close form: the same formula the backend uses for
   // pnl_pct, so the ×100 contract multiplier stops being invisible.
@@ -908,12 +936,15 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
           <div className="text-[9px] text-[#57575c] leading-snug">
             {tickerOverridden ? (
               <>
-                代號 {draft.ticker}（手動輸入）· 將以到期日 {fmtExpirationDate(effectiveExpirationDate)} 擷取進場 GEX 快照（與終端機目前的{" "}
+                代號 {draft.ticker}（手動輸入）· 將以
+                {draft.optionType === "MULTI_LEG" ? "最早腿到期日" : "到期日"}{" "}
+                {fmtExpirationDate(effectiveExpirationDate)} 擷取進場 GEX 快照（與終端機目前的{" "}
                 {(ticker || "—").toUpperCase()} 無關）
               </>
             ) : (
               <>
-                將以到期日 {fmtExpirationDate(effectiveExpirationDate)} 擷取 {draft.ticker || "—"} 的進場 GEX 快照
+                將以{draft.optionType === "MULTI_LEG" ? "最早腿到期日" : "到期日"}{" "}
+                {fmtExpirationDate(effectiveExpirationDate)} 擷取 {draft.ticker || "—"} 的進場 GEX 快照
               </>
             )}
           </div>
