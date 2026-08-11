@@ -2,11 +2,11 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, time as clock_time
+from datetime import date, datetime
 from typing import Literal
-from zoneinfo import ZoneInfo
 
 from app import pinning_engine
+from app.market_time import MARKET_CLOSE, MARKET_TIMEZONE
 from app.models import GEXStatus, OptionGEXSummary, PinningAnalysis, RiskProfile
 
 
@@ -26,16 +26,6 @@ IMMINENT_EXPIRY_WARNING = (
 # at all, which then cleared theta_warning on the resulting plan card.
 IMMINENT_EXPIRY_DTE = 1
 SHORT_DATED_DTE = 7
-
-# US listed options expire on a US market date at the 4:00 PM ET close, so
-# every "what date is it for expiry-counting purposes" question has to be
-# answered in market time. A bare UTC date is wrong for ~4 hours of every
-# day (after 8pm ET it has already rolled to tomorrow), which flips 1DTE
-# contracts into 0DTE a full session early. Audit timestamps
-# (calculated_at / captured_at / created_at) still use real UTC instants —
-# only DTE-relevant dates live in this timezone.
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
-MARKET_CLOSE = clock_time(16, 0)
 
 # Gamma scales as 1/sqrt(T), so flooring T at one whole calendar day makes a
 # contract expiring in 20 minutes look identical to one expiring tomorrow

@@ -1,13 +1,10 @@
-from datetime import date, datetime, time as clock_time, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
+from app.market_time import MARKET_CLOSE, MARKET_TIMEZONE
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
-MARKET_CLOSE = clock_time(16, 0)
 
 
 class GEXStatus(str, Enum):
