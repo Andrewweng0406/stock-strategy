@@ -199,6 +199,20 @@ async def test_gex_snapshot_repository_last_snapshot_time_can_scope_by_dte() -> 
 
 
 @pytest.mark.asyncio
+async def test_gex_snapshot_repository_normalizes_ticker_case() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    await repo.save_snapshot("aapl", 30, gex_summary(stock_price=100.0))
+
+    listed = await repo.list_snapshots("AaPl")
+    latest = await repo.latest_snapshot("aApL", 30)
+
+    assert len(listed) == 1
+    assert listed[0].ticker == "AAPL"
+    assert latest is not None
+    assert latest.ticker == "AAPL"
+
+
+@pytest.mark.asyncio
 async def test_gex_snapshot_repository_save_snapshot_returns_id() -> None:
     repo = GEXSnapshotRepository(await _session_factory())
     snapshot_id = await repo.save_snapshot("AAPL", 30, gex_summary())

@@ -591,6 +591,7 @@ class GEXSnapshotRepository:
     async def save_snapshot(
         self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
     ) -> int:
+        ticker = ticker.strip().upper()
         async with self.session_factory() as session:
             record = GEXSnapshotDBRecord(
                 ticker=ticker,
@@ -614,6 +615,7 @@ class GEXSnapshotRepository:
     async def last_snapshot_time(
         self, ticker: str, days_to_expiration: int | None = None
     ) -> datetime | None:
+        ticker = ticker.strip().upper()
         async with self.session_factory() as session:
             query = select(GEXSnapshotDBRecord.captured_at).where(
                 GEXSnapshotDBRecord.ticker == ticker
@@ -635,6 +637,7 @@ class GEXSnapshotRepository:
     async def latest_snapshot(
         self, ticker: str, days_to_expiration: int
     ) -> GEXSnapshot | None:
+        ticker = ticker.strip().upper()
         async with self.session_factory() as session:
             record = await session.scalar(
                 select(GEXSnapshotDBRecord)
@@ -648,6 +651,7 @@ class GEXSnapshotRepository:
             return _snapshot_from_record(record)
 
     async def list_snapshots(self, ticker: str, limit: int = 100) -> list[GEXSnapshot]:
+        ticker = ticker.strip().upper()
         async with self.session_factory() as session:
             records = await session.scalars(
                 select(GEXSnapshotDBRecord)
