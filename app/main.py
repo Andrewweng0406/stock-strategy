@@ -252,14 +252,24 @@ def _require_synced_summary_ticker(ticker: str, summary: OptionGEXSummary) -> st
     return normalized
 
 
-def _attach_security_headers(response: Response) -> Response:
+def _attach_security_headers(response: Response, *, is_https: bool = False) -> Response:
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-site")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    )
     response.headers.setdefault(
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=()",
     )
+    if is_https:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return response
 
 
@@ -275,10 +285,11 @@ async def security_and_sync_guard(request: Request, call_next):
                 JSONResponse(
                     status_code=403,
                     content={"detail": "Invalid sync token"},
-                )
+                ),
+                is_https=request.url.scheme == "https",
             )
     response = await call_next(request)
-    return _attach_security_headers(response)
+    return _attach_security_headers(response, is_https=request.url.scheme == "https")
 
 
 @app.exception_handler(MarketDataUnavailableError)
