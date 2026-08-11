@@ -95,5 +95,15 @@ becomes `US.AAPL` for OpenD calls.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+PYTHONPATH=. pytest -q
+cd web
+npm run build
+npm run test:e2e
+npm audit --omit=optional
 ```
+
+GitHub Actions runs the same product gate on every push to `main` and every
+pull request: backend compile + pytest, frontend production build, Playwright
+browser regressions, and dependency audit. CI deliberately disables Moomoo,
+yfinance fallback, Redis, and synthetic market data so tests cannot pass by
+depending on a local broker session, a network data source, or fake levels.
