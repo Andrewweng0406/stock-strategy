@@ -16,7 +16,8 @@ fail() {
 
 echo "Checking backend health at ${BACKEND_URL}/health"
 health_file="$tmpdir/health.json"
-curl -fsS "${BACKEND_URL}/health" -o "$health_file"
+health_headers="$tmpdir/health.headers"
+curl -fsS -D "$health_headers" "${BACKEND_URL}/health" -o "$health_file"
 
 python3 - "$health_file" <<'PY'
 import json
@@ -40,6 +41,32 @@ if set(cloud_sync) != expected_sync_keys:
 if "token" in json.dumps(payload).lower():
     raise SystemExit("backend health response appears to expose token material")
 print(f"backend market data mode: {mode}")
+PY
+
+python3 - "$health_headers" <<'PY'
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    raw = fh.read()
+
+headers = {}
+for line in raw.replace("\r\n", "\n").split("\n"):
+    if ":" not in line:
+        continue
+    key, value = line.split(":", 1)
+    headers[key.strip().lower()] = value.strip()
+
+expected = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+for header, value in expected.items():
+    actual = headers.get(header.lower())
+    if actual != value:
+        raise SystemExit(f"{header} is {actual!r}; expected {value!r}")
+print("backend security headers ok")
 PY
 
 echo "Checking trusted GEX response for ${SMOKE_TICKER} ${SMOKE_DTE}DTE"
