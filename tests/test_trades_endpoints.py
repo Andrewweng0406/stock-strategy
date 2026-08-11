@@ -131,6 +131,49 @@ def test_create_trade_accepts_explicit_direction_and_credit_debit(monkeypatch) -
     assert trade["expiration_date"] == _default_expiration_date()
     assert trade["option_type"] == "MULTI_LEG"
     assert len(trade["legs"]) == 2
+    assert trade["legs"][0]["expiration_date"] == _default_expiration_date()
+    assert trade["legs"][1]["quantity"] == 2
+
+
+def test_create_trade_rejects_multileg_top_level_expiration_that_is_not_earliest_leg(
+    monkeypatch,
+) -> None:
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTBADLEGEXP")
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-bad-leg-exp",
+                "ticker": "TJTESTBADLEGEXP",
+                "strategy_type": "Ratio Spread",
+                "direction": "NEUTRAL",
+                "credit_debit": "CREDIT",
+                "expiration_date": _default_expiration_date(offset_days=30),
+                "option_type": "MULTI_LEG",
+                "legs": [
+                    {
+                        "side": "BUY",
+                        "option_type": "CALL",
+                        "strike_price": 100.0,
+                        "expiration_date": _default_expiration_date(offset_days=7),
+                        "quantity": 1,
+                        "price": 1.25,
+                    },
+                    {
+                        "side": "SELL",
+                        "option_type": "CALL",
+                        "strike_price": 105.0,
+                        "expiration_date": _default_expiration_date(offset_days=30),
+                        "quantity": 2,
+                        "price": 0.65,
+                    },
+                ],
+                "entry_price": 1.25,
+                "position_size": 2,
+            },
+        )
+    assert response.status_code == 422
+    assert "earliest leg expiration" in response.text
 
 
 def test_list_trades_preserves_contract_identity(monkeypatch) -> None:

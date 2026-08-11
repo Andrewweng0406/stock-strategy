@@ -33,8 +33,12 @@ function corsHeaders() {
   };
 }
 
-async function installApiStub(page, { initialTrades = [] } = {}) {
+async function installApiStub(
+  page,
+  { initialTrades = [], onCreateTrade = () => {}, onCloseTrade = () => {} } = {}
+) {
   const trades = [...initialTrades];
+  const reviews = new Map();
   await page.route(`${API_BASE}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -95,6 +99,7 @@ async function installApiStub(page, { initialTrades = [] } = {}) {
     }
     if (url.pathname === "/api/v1/trades" && request.method() === "POST") {
       const payload = request.postDataJSON();
+      onCreateTrade(payload);
       if (!payload.expiration_date) {
         await json({ detail: "expiration_date is required" }, 422);
         return;
@@ -126,6 +131,52 @@ async function installApiStub(page, { initialTrades = [] } = {}) {
       };
       trades.unshift(trade);
       await json(trade);
+      return;
+    }
+    const tradeMatch = url.pathname.match(/^\/api\/v1\/trades\/([^/]+)$/);
+    if (tradeMatch && request.method() === "PUT") {
+      const trade = trades.find((t) => t.id === tradeMatch[1]);
+      if (!trade) {
+        await json({ detail: "Trade not found" }, 404);
+        return;
+      }
+      const payload = request.postDataJSON();
+      onCloseTrade(payload, trade);
+      const pnlPct = (payload.pnl / (trade.entry_price * 100 * trade.position_size)) * 100;
+      Object.assign(trade, {
+        exit_price: payload.exit_price,
+        exit_date: payload.exit_date,
+        pnl: payload.pnl,
+        pnl_pct: pnlPct,
+        status: "CLOSED",
+      });
+      await json(trade);
+      return;
+    }
+    const reviewMatch = url.pathname.match(/^\/api\/v1\/trades\/([^/]+)\/review$/);
+    if (reviewMatch && request.method() === "GET") {
+      await json(reviews.get(reviewMatch[1]) || null);
+      return;
+    }
+    if (reviewMatch && request.method() === "POST") {
+      const trade = trades.find((t) => t.id === reviewMatch[1]);
+      if (!trade) {
+        await json({ detail: "Trade not found" }, 404);
+        return;
+      }
+      if (trade.status !== "CLOSED") {
+        await json({ detail: "Trade must be closed before review" }, 400);
+        return;
+      }
+      const review = {
+        trade_id: trade.id,
+        execution_score: 4,
+        ai_feedback: "Good exit discipline. Position sizing and contract identity are clear.",
+        key_takeaways: ["Closed with a positive R/R profile", "Contract metadata was preserved"],
+        created_at: "2026-08-10T13:00:00Z",
+      };
+      reviews.set(trade.id, review);
+      await json(review);
       return;
     }
 
@@ -190,4 +241,166 @@ test("legacy trades without expiration are explicitly marked instead of looking 
   const card = page.locator("text=AAPL · Long Put").locator("..").locator("..");
   await expect(card).toContainText("到期未記錄");
   await expect(card).not.toContainText("到期 —");
+});
+
+test("single-leg trade can be closed and reviewed with correct debit PnL display", async ({ page }) => {
+  const trade = {
+    id: "open-debit-trade",
+    user_id: "web-client",
+    ticker: "AAPL",
+    strategy_type: "Long Call",
+    direction: "LONG",
+    credit_debit: "DEBIT",
+    expiration_date: "2026-08-21",
+    option_type: "CALL",
+    strike_price: 450,
+    contract_symbol: "AAPL260821C00450000",
+    legs: [],
+    source_plan_id: null,
+    entry_date: "2026-08-10T12:00:00Z",
+    exit_date: null,
+    entry_price: 5.25,
+    exit_price: null,
+    position_size: 2,
+    pnl: null,
+    pnl_pct: null,
+    status: "OPEN",
+    notes: null,
+    entry_gex_snapshot_id: 10,
+    created_at: "2026-08-10T12:00:00Z",
+  };
+  let closePayload = null;
+  await installApiStub(page, {
+    initialTrades: [trade],
+    onCloseTrade: (payload) => {
+      closePayload = payload;
+    },
+  });
+
+  await page.goto("/");
+  await page.getByTitle("交易日誌").click();
+
+  const openCard = page.locator("text=AAPL · Long Call").locator("..").locator("..");
+  await openCard.getByRole("button", { name: "平倉" }).click();
+  await page.getByPlaceholder("出場價").fill("7.25");
+  await expect(openCard).toContainText("$400（+38.10%）");
+  await openCard.getByRole("button", { name: "套用" }).click();
+  await expect(page.getByPlaceholder("損益（$）")).toHaveValue("400.00");
+  await openCard.getByRole("button", { name: "確認平倉" }).click();
+
+  expect(closePayload.exit_price).toBe(7.25);
+  expect(closePayload.pnl).toBe(400);
+  const closedCard = page.locator("text=AAPL · Long Call").locator("..").locator("..");
+  await expect(closedCard).toContainText("+38.10%");
+  await expect(closedCard).toContainText("損益 $400");
+
+  await closedCard.getByRole("button", { name: /觸發 AI 覆盤分析/ }).click();
+  await expect(closedCard).toContainText("Good exit discipline");
+  await expect(closedCard).toContainText("Contract metadata was preserved");
+});
+
+test("credit close math uses entry minus exit before applying contract multiplier", async ({ page }) => {
+  const trade = {
+    id: "open-credit-trade",
+    user_id: "web-client",
+    ticker: "AAPL",
+    strategy_type: "Bull Put Credit Spread",
+    direction: "LONG",
+    credit_debit: "CREDIT",
+    expiration_date: "2026-08-21",
+    option_type: "PUT",
+    strike_price: 210,
+    contract_symbol: null,
+    legs: [],
+    source_plan_id: null,
+    entry_date: "2026-08-10T12:00:00Z",
+    exit_date: null,
+    entry_price: 2.5,
+    exit_price: null,
+    position_size: 2,
+    pnl: null,
+    pnl_pct: null,
+    status: "OPEN",
+    notes: null,
+    entry_gex_snapshot_id: 10,
+    created_at: "2026-08-10T12:00:00Z",
+  };
+  await installApiStub(page, { initialTrades: [trade] });
+
+  await page.goto("/");
+  await page.getByTitle("交易日誌").click();
+
+  const card = page.locator("text=AAPL · Bull Put Credit Spread").locator("..").locator("..");
+  await card.getByRole("button", { name: "平倉" }).click();
+  await page.getByPlaceholder("出場價").fill("0.50");
+
+  await expect(card).toContainText("$400（+80.00%）");
+  await expect(card).toContainText("($2.5 收取 − $0.5 買回) × 100 股/口 × 2 口");
+});
+
+test("multi-leg trade preserves manual direction, credit/debit, and every leg in payload", async ({ page }) => {
+  let createPayload = null;
+  await installApiStub(page, {
+    onCreateTrade: (payload) => {
+      createPayload = payload;
+    },
+  });
+
+  await page.goto("/");
+  await page.getByTitle("交易日誌").click();
+
+  await page.getByPlaceholder("策略類型（可挑選或自行輸入）").fill("Ratio Spread");
+  await page.locator("select").nth(1).selectOption("NEUTRAL");
+  await page.locator("select").nth(2).selectOption("CREDIT");
+  await page.locator("select").nth(3).selectOption("MULTI_LEG");
+
+  const legDates = page.locator('input[type="date"]');
+  await legDates.nth(1).fill("2026-08-21");
+  await legDates.nth(2).fill("2026-08-28");
+  await page.getByPlaceholder("Strike").nth(0).fill("450");
+  await page.getByPlaceholder("Strike").nth(1).fill("460");
+  await page.getByPlaceholder("Qty").nth(0).fill("1");
+  await page.getByPlaceholder("Qty").nth(1).fill("2");
+  await page.getByPlaceholder("Price").nth(0).fill("4.20");
+  await page.getByPlaceholder("Price").nth(1).fill("2.40");
+  await page.getByPlaceholder("進場價").fill("0.60");
+  await page.getByRole("button", { name: /新增交易/ }).click();
+
+  expect(createPayload).toMatchObject({
+    ticker: "AAPL",
+    strategy_type: "Ratio Spread",
+    direction: "NEUTRAL",
+    credit_debit: "CREDIT",
+    expiration_date: "2026-08-21",
+    option_type: "MULTI_LEG",
+    strike_price: null,
+    entry_price: 0.6,
+    position_size: 1,
+  });
+  expect(createPayload.legs).toEqual([
+    {
+      side: "BUY",
+      option_type: "CALL",
+      strike_price: 450,
+      expiration_date: "2026-08-21",
+      quantity: 1,
+      price: 4.2,
+      contract_symbol: null,
+    },
+    {
+      side: "SELL",
+      option_type: "CALL",
+      strike_price: 460,
+      expiration_date: "2026-08-28",
+      quantity: 2,
+      price: 2.4,
+      contract_symbol: null,
+    },
+  ]);
+
+  const card = page.locator("text=AAPL · Ratio Spread").locator("..").locator("..");
+  await expect(card).toContainText("到期 8/21");
+  await expect(card).toContainText("2 legs");
+  await expect(card).toContainText("方向 中性");
+  await expect(card).toContainText("資流 Credit");
 });

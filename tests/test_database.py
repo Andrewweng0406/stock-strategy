@@ -326,6 +326,15 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
     assert trade.direction == TradeDirection.NEUTRAL
     assert trade.credit_debit == TradeCreditDebit.CREDIT
     assert trade.expiration_date == date(2099, 8, 14)
+    assert len(trade.legs) == 2
+    assert trade.legs[0].side == "BUY"
+    assert trade.legs[0].strike_price == 100.0
+    assert trade.legs[0].quantity == 1
+    assert trade.legs[0].price == 2.0
+    assert trade.legs[1].side == "SELL"
+    assert trade.legs[1].strike_price == 105.0
+    assert trade.legs[1].quantity == 2
+    assert trade.legs[1].price == 1.0
 
 
 @pytest.mark.asyncio
