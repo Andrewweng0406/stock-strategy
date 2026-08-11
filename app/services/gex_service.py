@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 from app.cache import ResilientCache
 from app.database import GEXSnapshotRepository
 from app.market_data import MarketDataClient
-from app.models import ExpirationInfo, OptionGEXSummary
+from app.models import ExpirationInfo, OptionGEXSummary, PinningRegime
 from app.services.cloud_sync import CloudSync
 
 
@@ -151,6 +151,9 @@ class GEXService:
         the request path's cache-miss branch and the background poller.
         """
         summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
+        summary = await self._apply_prior_wall_breakout(
+            ticker, days_to_expiration, summary
+        )
         key = self._cache_key(ticker, days_to_expiration)
         await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
         if self.market_data.active_mode == "moomoo":
@@ -163,6 +166,45 @@ class GEXService:
                     self._maybe_snapshot(ticker, days_to_expiration, summary)
                 )
         return summary
+
+    async def _apply_prior_wall_breakout(
+        self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
+    ) -> OptionGEXSummary:
+        """Use the prior persisted wall for breakout detection.
+
+        The current GEX calculator deliberately constrains call_wall above
+        spot and put_wall below spot. That is correct for resistance/support
+        display, but it means a same-instant "spot crossed current wall" test
+        cannot fire. A breakout is temporal: current spot versus a previously
+        observed defence line for the same ticker and expiry.
+        """
+        if self.snapshot_repository is None or summary.pinning is None:
+            return summary
+        try:
+            prior = await self.snapshot_repository.latest_snapshot(
+                ticker, days_to_expiration
+            )
+        except Exception:
+            logger.warning("Prior GEX snapshot lookup failed for %s", ticker, exc_info=True)
+            return summary
+        if prior is None:
+            return summary
+
+        crossed_call = (
+            prior.call_wall_strike is not None
+            and summary.stock_price > prior.call_wall_strike
+        )
+        crossed_put = (
+            prior.put_wall_strike is not None
+            and summary.stock_price < prior.put_wall_strike
+        )
+        if not crossed_call and not crossed_put:
+            return summary
+
+        pinning = summary.pinning.model_copy(
+            update={"has_broken_wall": True, "regime": PinningRegime.BREAKOUT}
+        )
+        return summary.model_copy(update={"pinning": pinning})
 
     async def run_poller(self, poll_seconds: int) -> None:
         """Background loop: every `poll_seconds`, re-fetch and re-push every

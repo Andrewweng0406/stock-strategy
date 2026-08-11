@@ -624,6 +624,21 @@ class GEXSnapshotRepository:
             # is written in UTC, so a naive value read back is always UTC.
             return _as_utc(captured_at)
 
+    async def latest_snapshot(
+        self, ticker: str, days_to_expiration: int
+    ) -> GEXSnapshot | None:
+        async with self.session_factory() as session:
+            record = await session.scalar(
+                select(GEXSnapshotDBRecord)
+                .where(GEXSnapshotDBRecord.ticker == ticker)
+                .where(GEXSnapshotDBRecord.days_to_expiration == days_to_expiration)
+                .order_by(desc(GEXSnapshotDBRecord.captured_at), desc(GEXSnapshotDBRecord.id))
+                .limit(1)
+            )
+            if record is None:
+                return None
+            return _snapshot_from_record(record)
+
     async def list_snapshots(self, ticker: str, limit: int = 100) -> list[GEXSnapshot]:
         async with self.session_factory() as session:
             records = await session.scalars(
@@ -632,45 +647,32 @@ class GEXSnapshotRepository:
                 .order_by(desc(GEXSnapshotDBRecord.captured_at))
                 .limit(limit)
             )
-            return [
-                GEXSnapshot(
-                    ticker=record.ticker,
-                    days_to_expiration=record.days_to_expiration,
-                    captured_at=_as_utc(record.captured_at),
-                    underlying_price=record.underlying_price,
-                    zero_gamma_strike=record.zero_gamma_strike,
-                    call_wall_strike=record.call_wall_strike,
-                    put_wall_strike=record.put_wall_strike,
-                    net_gex=record.net_gex,
-                    iv_rank=record.iv_rank,
-                    gex_status=GEXStatus(record.gex_status),
-                    data_source=MarketDataSource(record.data_source),
-                    is_delayed=record.is_delayed,
-                    is_synthetic=record.is_synthetic,
-                )
-                for record in records
-            ]
+            return [_snapshot_from_record(record) for record in records]
 
     async def get_snapshot(self, snapshot_id: int) -> GEXSnapshot | None:
         async with self.session_factory() as session:
             record = await session.get(GEXSnapshotDBRecord, snapshot_id)
             if record is None:
                 return None
-            return GEXSnapshot(
-                ticker=record.ticker,
-                days_to_expiration=record.days_to_expiration,
-                captured_at=_as_utc(record.captured_at),
-                underlying_price=record.underlying_price,
-                zero_gamma_strike=record.zero_gamma_strike,
-                call_wall_strike=record.call_wall_strike,
-                put_wall_strike=record.put_wall_strike,
-                net_gex=record.net_gex,
-                iv_rank=record.iv_rank,
-                gex_status=GEXStatus(record.gex_status),
-                data_source=MarketDataSource(record.data_source),
-                is_delayed=record.is_delayed,
-                is_synthetic=record.is_synthetic,
-            )
+            return _snapshot_from_record(record)
+
+
+def _snapshot_from_record(record: GEXSnapshotDBRecord) -> GEXSnapshot:
+    return GEXSnapshot(
+        ticker=record.ticker,
+        days_to_expiration=record.days_to_expiration,
+        captured_at=_as_utc(record.captured_at),
+        underlying_price=record.underlying_price,
+        zero_gamma_strike=record.zero_gamma_strike,
+        call_wall_strike=record.call_wall_strike,
+        put_wall_strike=record.put_wall_strike,
+        net_gex=record.net_gex,
+        iv_rank=record.iv_rank,
+        gex_status=GEXStatus(record.gex_status),
+        data_source=MarketDataSource(record.data_source),
+        is_delayed=record.is_delayed,
+        is_synthetic=record.is_synthetic,
+    )
 
 
 class TradeRecord(Base):

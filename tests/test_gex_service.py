@@ -1,12 +1,19 @@
 import asyncio
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.cache import InMemoryCache
-from app.models import ExpirationInfo, ExpirationType, GEXStatus, OptionGEXSummary
+from app.models import (
+    ExpirationInfo,
+    ExpirationType,
+    GEXSnapshot,
+    GEXStatus,
+    OptionGEXSummary,
+    PinningAnalysis,
+)
 from app.services.gex_service import GEXService
 
 
@@ -14,6 +21,17 @@ def _fake_summary(ticker: str = "AAPL") -> OptionGEXSummary:
     return OptionGEXSummary(
         ticker=ticker, stock_price=100.0, zero_gamma=95.0, call_wall=105.0,
         put_wall=95.0, iv_rank=40.0, net_gex=1_000_000.0, gex_status=GEXStatus.POS_GAMMA,
+        pinning=PinningAnalysis(
+            pin_strike=100.0,
+            pin_strike_matches_max_pain=True,
+            distance_pct=0.0,
+            oi_concentration_pct=50.0,
+            in_positive_gamma=True,
+            has_broken_wall=False,
+            score=100,
+            label="極高",
+            regime="PINNING",
+        ),
     )
 
 
@@ -27,10 +45,51 @@ class _FakeMarketData:
         ]
 
     async def get_gex_summary(self, ticker: str, days_to_expiration: int):
-        raise NotImplementedError
+        return _fake_summary(ticker)
 
     async def get_gex_summary_multi(self, ticker: str, expiration_dates: list[date]):
         return _fake_summary(ticker)
+
+
+class _FakeSnapshotRepository:
+    def __init__(self, latest: GEXSnapshot | None = None) -> None:
+        self.latest = latest
+        self.saved = []
+
+    async def latest_snapshot(
+        self, ticker: str, days_to_expiration: int
+    ) -> GEXSnapshot | None:
+        return self.latest
+
+    async def last_snapshot_time(self, ticker: str):
+        return None
+
+    async def save_snapshot(
+        self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary
+    ) -> int:
+        self.saved.append((ticker, days_to_expiration, summary))
+        return len(self.saved)
+
+
+def _snapshot(
+    *,
+    ticker: str = "AAPL",
+    dte: int = 6,
+    call_wall: float | None = 98.0,
+    put_wall: float | None = 90.0,
+) -> GEXSnapshot:
+    return GEXSnapshot(
+        ticker=ticker,
+        days_to_expiration=dte,
+        captured_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        underlying_price=97.0,
+        zero_gamma_strike=95.0,
+        call_wall_strike=call_wall,
+        put_wall_strike=put_wall,
+        net_gex=1_000_000.0,
+        iv_rank=40.0,
+        gex_status=GEXStatus.POS_GAMMA,
+    )
 
 
 @pytest.mark.asyncio
@@ -105,6 +164,46 @@ async def test_get_summary_keeps_only_latest_dte_active_per_ticker(monkeypatch) 
     await service.get_summary("AAPL", 13)
 
     assert set(service._active.keys()) == {("AAPL", 13)}
+
+
+@pytest.mark.asyncio
+async def test_get_summary_without_prior_snapshot_preserves_current_pinning() -> None:
+    repo = _FakeSnapshotRepository()
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        snapshot_repository=repo,
+    )
+
+    summary = await service.get_summary("AAPL", 6)
+    await asyncio.sleep(0)
+
+    assert summary.pinning is not None
+    assert summary.pinning.regime == "PINNING"
+    assert summary.pinning.has_broken_wall is False
+    assert repo.saved[0][2].pinning.regime == "PINNING"
+
+
+@pytest.mark.asyncio
+async def test_get_summary_uses_prior_wall_for_breakout_detection() -> None:
+    repo = _FakeSnapshotRepository(latest=_snapshot(call_wall=98.0, put_wall=90.0))
+    service = GEXService(
+        market_data=_FakeMarketData("moomoo"),
+        cache=InMemoryCache(),
+        ttl_seconds=30,
+        snapshot_repository=repo,
+    )
+
+    summary = await service.get_summary("AAPL", 6)
+    await asyncio.sleep(0)
+
+    assert summary.stock_price == 100.0
+    assert summary.call_wall == 105.0  # current wall remains displayable resistance
+    assert summary.pinning is not None
+    assert summary.pinning.has_broken_wall is True
+    assert summary.pinning.regime == "BREAKOUT"
+    assert repo.saved[0][2].pinning.regime == "BREAKOUT"
 
 
 @pytest.mark.asyncio

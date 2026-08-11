@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
@@ -168,6 +169,23 @@ async def test_gex_snapshot_repository_list_respects_limit() -> None:
     snapshots = await repo.list_snapshots("AAPL", limit=1)
     assert len(snapshots) == 1
     assert snapshots[0].underlying_price == 102.0
+
+
+@pytest.mark.asyncio
+async def test_gex_snapshot_repository_latest_snapshot_scopes_by_ticker_and_dte() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    await repo.save_snapshot("AAPL", 30, gex_summary(stock_price=100.0))
+    await repo.save_snapshot("AAPL", 45, gex_summary(stock_price=145.0))
+    await repo.save_snapshot("TSLA", 30, gex_summary(stock_price=250.0))
+    await asyncio.sleep(0.001)
+    await repo.save_snapshot("AAPL", 30, gex_summary(stock_price=101.0))
+
+    latest = await repo.latest_snapshot("AAPL", 30)
+
+    assert latest is not None
+    assert latest.ticker == "AAPL"
+    assert latest.days_to_expiration == 30
+    assert latest.underlying_price == 101.0
 
 
 @pytest.mark.asyncio
