@@ -1,5 +1,6 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -7,6 +8,7 @@ from app.analytics import market_today
 from app.config import settings
 from app.main import app
 from app.market_data import MarketDataUnavailableError
+from app.models import TradeCreate
 from app.services.gex_service import GEXService
 
 
@@ -262,6 +264,45 @@ def test_create_trade_rejects_expiration_before_entry_date(monkeypatch) -> None:
             },
         )
     assert response.status_code == 422
+
+
+def test_trade_create_allows_same_day_expiration_before_market_close() -> None:
+    trade = TradeCreate(
+        user_id="user-same-day-before-close",
+        ticker="TJTESTSAMEDAY",
+        strategy_type="Long Call",
+        entry_date=datetime(
+            2099, 8, 14, 15, 30, tzinfo=ZoneInfo("America/New_York")
+        ),
+        expiration_date=date(2099, 8, 14),
+        option_type="CALL",
+        strike_price=100.0,
+        entry_price=1.25,
+        position_size=1,
+    )
+
+    assert trade.expiration_date == date(2099, 8, 14)
+
+
+def test_create_trade_rejects_same_day_expiration_after_market_close() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-same-day-after-close",
+                "ticker": "TJTESTAFTERCLOSE",
+                "strategy_type": "Long Call",
+                "entry_date": "2099-08-14T16:01:00-04:00",
+                "expiration_date": "2099-08-14",
+                "option_type": "CALL",
+                "strike_price": 100.0,
+                "entry_price": 1.25,
+                "position_size": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "market close" in response.text
 
 
 def test_create_trade_requires_expiration_date(monkeypatch) -> None:

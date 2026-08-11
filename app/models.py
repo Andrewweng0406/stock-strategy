@@ -1,9 +1,13 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as clock_time, timezone
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
+MARKET_CLOSE = clock_time(16, 0)
 
 
 class GEXStatus(str, Enum):
@@ -305,8 +309,16 @@ class TradeCreate(StrictModel):
     @model_validator(mode="after")
     def expiration_cannot_precede_entry(self) -> "TradeCreate":
         entry_date = self.entry_date or datetime.now(timezone.utc)
-        if self.expiration_date < entry_date.date():
+        if entry_date.tzinfo is None:
+            entry_date = entry_date.replace(tzinfo=timezone.utc)
+        market_entry = entry_date.astimezone(MARKET_TIMEZONE)
+        if self.expiration_date < market_entry.date():
             raise ValueError("expiration_date cannot be before entry_date")
+        if (
+            self.expiration_date == market_entry.date()
+            and market_entry.time() > MARKET_CLOSE
+        ):
+            raise ValueError("expiration_date cannot be after market close on entry_date")
         return self
 
     @model_validator(mode="after")
