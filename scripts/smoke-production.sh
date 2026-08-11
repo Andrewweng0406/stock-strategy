@@ -101,6 +101,8 @@ if payload.get("is_synthetic") is not False:
     raise SystemExit(f"GEX payload must explicitly be non-synthetic: {payload.get('is_synthetic')!r}")
 if source == "YFINANCE" and payload.get("is_delayed") is not True:
     raise SystemExit("YFINANCE payload must explicitly be marked delayed")
+if not isinstance(payload.get("is_stale"), bool):
+    raise SystemExit(f"GEX payload must explicitly expose is_stale: {payload.get('is_stale')!r}")
 
 price = payload.get("stock_price")
 if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
@@ -117,7 +119,7 @@ if not isinstance(pinning, dict) or "score" not in pinning or "regime" not in pi
 print(
     "GEX payload ok: "
     f"{payload.get('ticker')} price={price} net_gex={net_gex} "
-    f"status={payload.get('gex_status')} source={source}"
+    f"status={payload.get('gex_status')} source={source} stale={payload.get('is_stale')}"
 )
 PY
 
