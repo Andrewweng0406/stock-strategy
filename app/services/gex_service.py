@@ -219,6 +219,13 @@ class GEXService:
             update={"is_stale": True}
         )
 
+    async def store_trusted_summary(
+        self, key: str, summary: OptionGEXSummary, ttl_seconds: int
+    ) -> None:
+        summary = summary.model_copy(update={"is_stale": False})
+        await self.cache.set(key, summary.model_dump_json(), ttl_seconds)
+        await self._store_stale_summary(key, summary)
+
     async def _store_stale_summary(
         self, key: str, summary: OptionGEXSummary
     ) -> None:

@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -49,6 +51,26 @@ def test_sync_gex_round_trips_through_gex_endpoint(monkeypatch) -> None:
         gex_response = client.get("/api/v1/gex/SYNCTEST?days_to_expiration=30")
     assert gex_response.status_code == 200
     assert gex_response.json()["stock_price"] == 250.0
+
+
+def test_sync_gex_stores_trusted_stale_payload(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        store = AsyncMock()
+        monkeypatch.setattr(app.state.services.gex_service, "store_trusted_summary", store)
+        response = client.post(
+            "/api/v1/sync/gex",
+            json={"ticker": "SYNCTEST", "days_to_expiration": 30, "summary": _summary_payload()},
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+
+    assert response.status_code == 200
+    store.assert_awaited_once()
+    cache_key, summary, ttl_seconds = store.await_args.args
+    assert cache_key == "gex:v1:SYNCTEST:30"
+    assert summary.ticker == "SYNCTEST"
+    assert summary.is_stale is False
+    assert ttl_seconds == settings.cache_ttl_seconds
 
 
 def test_sync_gex_rejects_summary_ticker_mismatch(monkeypatch) -> None:
@@ -154,6 +176,30 @@ def test_sync_gex_aggregate_round_trips_through_aggregate_endpoint(monkeypatch) 
         )
     assert aggregate_response.status_code == 200
     assert aggregate_response.json()["stock_price"] == 250.0
+
+
+def test_sync_gex_aggregate_stores_trusted_stale_payload(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        store = AsyncMock()
+        monkeypatch.setattr(app.state.services.gex_service, "store_trusted_summary", store)
+        response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "SYNCTEST",
+                "expiration_dates": ["2026-08-21", "2026-08-14"],
+                "summary": _summary_payload(),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+
+    assert response.status_code == 200
+    store.assert_awaited_once()
+    cache_key, summary, ttl_seconds = store.await_args.args
+    assert cache_key == "gex:agg:v1:SYNCTEST:2026-08-14,2026-08-21"
+    assert summary.ticker == "SYNCTEST"
+    assert summary.is_stale is False
+    assert ttl_seconds == settings.aggregate_cache_ttl_seconds
 
 
 def test_sync_gex_aggregate_rejects_summary_ticker_mismatch(monkeypatch) -> None:
