@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import TradeJournalPanel from "./TradeJournal.jsx";
 import { parseErrorDetail } from "./apiError.js";
+import { BASE_URL, apiUrl, pathSegment } from "./apiUrl.js";
 
 /**
  * Trading Terminal Notebook
@@ -30,7 +31,6 @@ import { parseErrorDetail } from "./apiError.js";
  *   POST /api/v1/plans/save                          -> UserTradePlan (signed)
  */
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
 const DEFAULT_TICKER = "AAPL";
 // Backend's ChatContext.history caps at 30 entries; stay under that.
 const MAX_HISTORY = 24;
@@ -583,7 +583,7 @@ export default function TradingTerminalNotebook() {
   }
 
   function refreshConversations({ clearError = true } = {}) {
-    return fetch(`${BASE_URL}/api/v1/conversations?user_id=${userId}`)
+    return fetch(apiUrl("/api/v1/conversations", { user_id: userId }))
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -598,7 +598,7 @@ export default function TradingTerminalNotebook() {
 
   // ---------- Phase 3: load persisted history, plans, and profile once ----------
   function loadSignedPlans() {
-    return fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`)
+    return fetch(apiUrl("/api/v1/plans", { user_id: userId }))
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -616,7 +616,7 @@ export default function TradingTerminalNotebook() {
   }
 
   function loadProfile() {
-    return fetch(`${BASE_URL}/api/v1/profile/${userId}`)
+    return fetch(`${BASE_URL}/api/v1/profile/${pathSegment(userId)}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await parseErrorDetail(res));
         return res.json();
@@ -647,7 +647,10 @@ export default function TradingTerminalNotebook() {
     setHistoryError(null);
     try {
       const res = await fetch(
-        `${BASE_URL}/api/v1/conversations/${conversationSummary.conversation_id}/messages?user_id=${userId}`
+        apiUrl(
+          `/api/v1/conversations/${pathSegment(conversationSummary.conversation_id)}/messages`,
+          { user_id: userId }
+        )
       );
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
@@ -673,7 +676,7 @@ export default function TradingTerminalNotebook() {
     setProfileSaving(true);
     setProfileError(null);
     try {
-      const res = await fetch(`${BASE_URL}/api/v1/profile/${userId}`, {
+      const res = await fetch(`${BASE_URL}/api/v1/profile/${pathSegment(userId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Star, X } from "lucide-react";
 import { parseErrorDetail } from "./apiError.js";
+import { apiUrl, pathSegment } from "./apiUrl.js";
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
 const MONO =
   '[font-family:ui-monospace,"SF_Mono","JetBrains_Mono","IBM_Plex_Mono",Menlo,Consolas,monospace]';
 
@@ -248,7 +248,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${BASE_URL}/api/v1/trades?user_id=${userId}`);
+      const res = await fetch(apiUrl("/api/v1/trades", { user_id: userId }));
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
       const fetchedTrades = data.trades || [];
@@ -266,7 +266,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
       closedTrades.map(async (t) => {
         try {
           const res = await fetch(
-            `${BASE_URL}/api/v1/trades/${t.id}/review?user_id=${userId}`
+            apiUrl(`/api/v1/trades/${pathSegment(t.id)}/review`, { user_id: userId })
           );
           if (!res.ok) return null;
           const review = await res.json();
@@ -288,7 +288,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
   async function loadPlans() {
     setPlansError(null);
     try {
-      const res = await fetch(`${BASE_URL}/api/v1/plans?user_id=${userId}`);
+      const res = await fetch(apiUrl("/api/v1/plans", { user_id: userId }));
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       const data = await res.json();
       setPlans(data.plans || []);
@@ -427,7 +427,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     setCreating(true);
     setError(null);
     try {
-      const res = await fetch(`${BASE_URL}/api/v1/trades`, {
+      const res = await fetch(apiUrl("/api/v1/trades"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -500,7 +500,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     setError(null);
     try {
       const res = await fetch(
-        `${BASE_URL}/api/v1/trades/${tradeId}?user_id=${userId}`,
+        apiUrl(`/api/v1/trades/${pathSegment(tradeId)}`, { user_id: userId }),
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -534,8 +534,10 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     setError(null);
     try {
       const res = await fetch(
-        `${BASE_URL}/api/v1/trades/${tradeId}/review?user_id=${userId}` +
-          (force ? "&force=true" : ""),
+        apiUrl(`/api/v1/trades/${pathSegment(tradeId)}/review`, {
+          user_id: userId,
+          force: force ? "true" : null,
+        }),
         { method: "POST" }
       );
       if (!res.ok) throw new Error(await parseErrorDetail(res));

@@ -77,6 +77,7 @@ async function installTerminalStub(
     failExpirations = new Set(),
     failGex = new Set(),
     gexOverridesByTicker = {},
+    onRequest = () => {},
     onGexRequest = () => {},
     onChatRequest = () => {},
     onAggregateRequest = () => {},
@@ -85,6 +86,7 @@ async function installTerminalStub(
   await page.route(`${API_BASE}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    onRequest(url, request);
     if (request.method() === "OPTIONS") {
       await route.fulfill({ status: 204, headers: corsHeaders() });
       return;
@@ -323,4 +325,23 @@ test("mobile layout keeps primary panels reachable without horizontal overflow",
     () => document.documentElement.scrollWidth - window.innerWidth
   );
   expect(overflowPx).toBeLessThanOrEqual(1);
+});
+
+test("user scoped requests encode path and query parameters", async ({ page }) => {
+  const userId = "user+qa@example.com";
+  const observed = [];
+  await page.addInitScript((id) => {
+    window.localStorage.setItem("ttn_user_id", id);
+  }, userId);
+  await installTerminalStub(page, {
+    onRequest: (url) => observed.push(`${url.pathname}?${url.searchParams.toString()}`),
+  });
+
+  await page.goto("/");
+
+  await expect
+    .poll(() => observed)
+    .toContain(`/api/v1/conversations?user_id=${encodeURIComponent(userId)}`);
+  expect(observed).toContain(`/api/v1/plans?user_id=${encodeURIComponent(userId)}`);
+  expect(observed.some((entry) => entry.startsWith("/api/v1/profile/user%2Bqa%40example.com?"))).toBe(true);
 });
