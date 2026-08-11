@@ -29,7 +29,8 @@ cp .env.example .env
 python stockschedule.py
 ```
 
-Open `http://127.0.0.1:8000/docs` for the API documentation.
+Open `http://127.0.0.1:8002/docs` for the API documentation. Override the
+development port with `PORT=8000 python stockschedule.py` when needed.
 
 Redis is optional; an in-memory TTL cache is always maintained. Set
 `OPENAI_API_KEY` before calling `/api/v1/chat`. `DATABASE_URL` accepts either
@@ -50,9 +51,8 @@ npm run dev
 ```
 
 Opens on `http://127.0.0.1:5173` and talks to the backend via
-`VITE_API_BASE_URL`, which defaults to `http://127.0.0.1:8002` — note this
-differs from `stockschedule.py`'s own default port (`8000`), so either run
-the backend with `--port 8002` or set `VITE_API_BASE_URL` to match.
+`VITE_API_BASE_URL`, which defaults to `http://127.0.0.1:8002`, the same port
+used by `stockschedule.py`.
 
 ## Key environment variables
 
