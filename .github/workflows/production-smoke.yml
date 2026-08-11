@@ -1,0 +1,37 @@
+name: Production Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: Backend base URL
+        required: false
+        default: https://backend-production-0e24.up.railway.app
+      frontend_url:
+        description: Frontend base URL
+        required: false
+        default: https://frontend-production-e380d.up.railway.app
+      ticker:
+        description: Ticker used for the GEX smoke request
+        required: false
+        default: AAPL
+      days_to_expiration:
+        description: DTE used for the GEX smoke request
+        required: false
+        default: "11"
+
+jobs:
+  smoke:
+    name: Smoke Production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run production smoke gate
+        env:
+          BACKEND_URL: ${{ inputs.backend_url }}
+          FRONTEND_URL: ${{ inputs.frontend_url }}
+          SMOKE_TICKER: ${{ inputs.ticker }}
+          SMOKE_DTE: ${{ inputs.days_to_expiration }}
+        run: scripts/smoke-production.sh
