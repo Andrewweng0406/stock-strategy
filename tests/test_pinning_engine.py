@@ -72,6 +72,16 @@ def test_breakout_when_spot_below_put_wall():
     assert result["regime"] == "BREAKOUT"
 
 
+def test_same_instant_side_constrained_walls_do_not_create_breakout():
+    rows = [_row(100, 1000, 1000)]
+    result = compute_pinning_analysis(
+        rows, spot=100.0, max_pain=100.0, call_wall=105.0, put_wall=95.0,
+        in_positive_gamma=True,
+    )
+    assert result["has_broken_wall"] is False
+    assert result["regime"] == "PINNING"
+
+
 def test_pinning_when_close_concentrated_and_positive_gamma():
     rows = [_row(100, 5000, 5000), _row(90, 10, 10), _row(110, 10, 10)]
     result = compute_pinning_analysis(
