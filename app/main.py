@@ -282,6 +282,10 @@ TickerPath = Annotated[
     str,
     Path(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
 ]
+TickerQuery = Annotated[
+    str | None,
+    Query(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
+]
 UserIdQuery = Annotated[str, Query(min_length=1, max_length=128)]
 UserIdPath = Annotated[str, Path(min_length=1, max_length=128)]
 ConversationIdPath = Annotated[str, Path(min_length=1, max_length=128)]
@@ -586,7 +590,7 @@ async def create_trade(payload: TradeCreate, services: Services) -> Trade:
 async def list_trades(
     user_id: UserIdQuery,
     services: Services,
-    ticker: str | None = None,
+    ticker: TickerQuery = None,
     status: TradeStatus | None = None,
 ) -> TradeList:
     trades = await services.trade_repository.list_trades(

@@ -59,6 +59,29 @@ def test_ticker_path_rejects_overlong_symbols() -> None:
     assert response.status_code == 422
 
 
+def test_trade_list_ticker_filter_accepts_common_symbol_punctuation() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/trades?user_id=user-1&ticker=BRK.B")
+
+    assert response.status_code == 200
+    assert response.json()["trades"] == []
+
+
+def test_trade_list_ticker_filter_rejects_spaces() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/trades?user_id=user-1&ticker=BAD%20TICKER")
+
+    assert response.status_code == 422
+
+
+def test_trade_list_ticker_filter_rejects_overlong_symbols() -> None:
+    ticker = "A" * 33
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/trades?user_id=user-1&ticker={ticker}")
+
+    assert response.status_code == 422
+
+
 def test_sync_body_rejects_invalid_ticker_with_valid_token(monkeypatch) -> None:
     monkeypatch.setattr(settings, "sync_token", "test-sync-token")
 
