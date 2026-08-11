@@ -79,6 +79,7 @@ async function installTerminalStub(
     expirationsByTicker = { AAPL: aaplExpirations, TSLA: tslaExpirations },
     failExpirations = new Set(),
     failGex = new Set(),
+    historyByTicker = {},
     gexOverridesByTicker = {},
     onRequest = () => {},
     onGexRequest = () => {},
@@ -125,7 +126,8 @@ async function installTerminalStub(
       return;
     }
     if (url.pathname.match(/^\/api\/v1\/gex\/[^/]+\/history$/)) {
-      await fulfillJson(route, { ticker: url.pathname.split("/")[4], snapshots: [] });
+      const ticker = url.pathname.split("/")[4];
+      await fulfillJson(route, { ticker, snapshots: historyByTicker[ticker] || [] });
       return;
     }
     if (url.pathname.match(/^\/api\/v1\/expirations\/[^/]+$/)) {
@@ -315,6 +317,52 @@ test("GEX panel labels stale trusted snapshots", async ({ page }) => {
 
   await expect(page.getByText("Stale 快照")).toBeVisible();
   await expect(page.locator('[title*="最後一筆可信市場資料"]')).toBeVisible();
+});
+
+test("GEX history trend discloses stale snapshots", async ({ page }) => {
+  await installTerminalStub(page, {
+    historyByTicker: {
+      AAPL: [
+        {
+          ticker: "AAPL",
+          days_to_expiration: 11,
+          captured_at: "2026-08-10T13:00:00Z",
+          underlying_price: 231,
+          zero_gamma_strike: 225,
+          call_wall_strike: 240,
+          put_wall_strike: 215,
+          net_gex: 11000000,
+          iv_rank: 22,
+          gex_status: "POS_GAMMA",
+          data_source: "YFINANCE",
+          is_delayed: true,
+          is_synthetic: false,
+          is_stale: true,
+        },
+        {
+          ticker: "AAPL",
+          days_to_expiration: 11,
+          captured_at: "2026-08-10T12:00:00Z",
+          underlying_price: 230,
+          zero_gamma_strike: 224,
+          call_wall_strike: 239,
+          put_wall_strike: 214,
+          net_gex: 9000000,
+          iv_rank: 21,
+          gex_status: "POS_GAMMA",
+          data_source: "MOOMOO",
+          is_delayed: false,
+          is_synthetic: false,
+          is_stale: false,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("2 snapshots · 1 stale")).toBeVisible();
+  await expect(page.locator('[title*="stale 點位"]')).toBeVisible();
 });
 
 test("chat sends null DTE when the current ticker has no resolved expiration", async ({ page }) => {

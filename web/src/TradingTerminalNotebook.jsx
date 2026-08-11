@@ -856,7 +856,13 @@ export default function TradingTerminalNotebook() {
   const gexQuality = marketDataQuality(gexData);
   const gexHistoryChronological = [...gexHistory].reverse();
   const gexHistoryValues = gexHistoryChronological.map((s) => s.net_gex);
-  const gexHistoryLabels = gexHistoryChronological.map((s) => fmtDateTime(s.captured_at));
+  const gexHistoryStaleCount = gexHistory.filter((s) => s.is_stale).length;
+  const gexHistoryTag = gexHistoryValues.length
+    ? `${gexHistoryValues.length} snapshots${gexHistoryStaleCount ? ` · ${gexHistoryStaleCount} stale` : ""}`
+    : "No history";
+  const gexHistoryLabels = gexHistoryChronological.map((s) =>
+    `${fmtDateTime(s.captured_at)}${s.is_stale ? " · stale" : ""}`
+  );
 
   return (
     <div className={`h-screen flex flex-col bg-[#121214] text-[#f0ede5] ${MONO} text-[13px] overflow-hidden`}>
@@ -1035,10 +1041,10 @@ export default function TradingTerminalNotebook() {
                 <Card>
                   <CardTitle
                     title="Net GEX Trend"
-                    tag={gexHistoryValues.length ? `${gexHistoryValues.length} snapshots` : "No history"}
+                    tag={gexHistoryTag}
                     tagTitle={
                       gexHistoryError ||
-                      "來自後端 gex_snapshots；沒有真實快照時不顯示假趨勢"
+                      "來自後端 gex_snapshots；stale 點位代表資料源失敗後的最後可信快照"
                     }
                   />
                   <Sparkline values={gexHistoryValues} labels={gexHistoryLabels} />
