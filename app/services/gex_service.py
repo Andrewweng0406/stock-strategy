@@ -303,7 +303,9 @@ class GEXService:
         """
         assert self.snapshot_repository is not None
         try:
-            last = await self.snapshot_repository.last_snapshot_time(ticker)
+            last = await self.snapshot_repository.last_snapshot_time(
+                ticker, days_to_expiration
+            )
             if last is not None:
                 age = datetime.now(timezone.utc) - last
                 if age.total_seconds() < self.snapshot_interval_seconds:

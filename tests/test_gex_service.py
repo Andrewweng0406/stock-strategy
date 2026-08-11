@@ -55,13 +55,17 @@ class _FakeSnapshotRepository:
     def __init__(self, latest: GEXSnapshot | None = None) -> None:
         self.latest = latest
         self.saved = []
+        self.last_snapshot_time_calls = []
 
     async def latest_snapshot(
         self, ticker: str, days_to_expiration: int
     ) -> GEXSnapshot | None:
         return self.latest
 
-    async def last_snapshot_time(self, ticker: str):
+    async def last_snapshot_time(
+        self, ticker: str, days_to_expiration: int | None = None
+    ):
+        self.last_snapshot_time_calls.append((ticker, days_to_expiration))
         return None
 
     async def save_snapshot(
@@ -182,6 +186,7 @@ async def test_get_summary_without_prior_snapshot_preserves_current_pinning() ->
     assert summary.pinning is not None
     assert summary.pinning.regime == "PINNING"
     assert summary.pinning.has_broken_wall is False
+    assert repo.last_snapshot_time_calls == [("AAPL", 6)]
     assert repo.saved[0][2].pinning.regime == "PINNING"
 
 

@@ -189,6 +189,16 @@ async def test_gex_snapshot_repository_latest_snapshot_scopes_by_ticker_and_dte(
 
 
 @pytest.mark.asyncio
+async def test_gex_snapshot_repository_last_snapshot_time_can_scope_by_dte() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    await repo.save_snapshot("AAPL", 30, gex_summary(stock_price=100.0))
+
+    assert await repo.last_snapshot_time("AAPL", 45) is None
+    assert await repo.last_snapshot_time("AAPL", 30) is not None
+    assert await repo.last_snapshot_time("AAPL") is not None
+
+
+@pytest.mark.asyncio
 async def test_gex_snapshot_repository_save_snapshot_returns_id() -> None:
     repo = GEXSnapshotRepository(await _session_factory())
     snapshot_id = await repo.save_snapshot("AAPL", 30, gex_summary())

@@ -611,11 +611,19 @@ class GEXSnapshotRepository:
             await session.commit()
             return record.id
 
-    async def last_snapshot_time(self, ticker: str) -> datetime | None:
+    async def last_snapshot_time(
+        self, ticker: str, days_to_expiration: int | None = None
+    ) -> datetime | None:
         async with self.session_factory() as session:
+            query = select(GEXSnapshotDBRecord.captured_at).where(
+                GEXSnapshotDBRecord.ticker == ticker
+            )
+            if days_to_expiration is not None:
+                query = query.where(
+                    GEXSnapshotDBRecord.days_to_expiration == days_to_expiration
+                )
             captured_at = await session.scalar(
-                select(GEXSnapshotDBRecord.captured_at)
-                .where(GEXSnapshotDBRecord.ticker == ticker)
+                query
                 .order_by(desc(GEXSnapshotDBRecord.captured_at))
                 .limit(1)
             )
