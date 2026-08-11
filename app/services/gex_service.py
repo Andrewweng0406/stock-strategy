@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from pydantic import TypeAdapter
 
 from app.cache import ResilientCache
-from app.database import GEXSnapshotRepository
+from app.database import GEXSnapshotRepository, GEXSummaryCacheRepository
 from app.market_data import MarketDataClient, MarketDataUnavailableError
 from app.models import ExpirationInfo, OptionGEXSummary, PinningRegime
 from app.services.cloud_sync import CloudSync
@@ -31,6 +31,8 @@ class GEXService:
         snapshot_interval_seconds: int = 3600,
         aggregate_ttl_seconds: int | None = None,
         stale_ttl_seconds: int = 900,
+        *,
+        summary_cache_repository: GEXSummaryCacheRepository | None = None,
     ) -> None:
         self.market_data = market_data
         self.cache = cache
@@ -46,6 +48,7 @@ class GEXService:
         # not given explicitly.
         self.aggregate_ttl_seconds = aggregate_ttl_seconds if aggregate_ttl_seconds is not None else ttl_seconds
         self.stale_ttl_seconds = stale_ttl_seconds
+        self.summary_cache_repository = summary_cache_repository
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # (ticker, days_to_expiration) -> monotonic time last requested by a
         # real caller. Drives the background poller — only tickers/expiries
@@ -119,7 +122,7 @@ class GEXService:
         try:
             summary = await self.market_data.get_gex_summary_multi(ticker, sorted_dates)
         except MarketDataUnavailableError:
-            stale = await self.cache.get_stale(key)
+            stale = await self._load_stale_summary(key)
             if stale is None:
                 raise
             logger.warning(
@@ -127,14 +130,10 @@ class GEXService:
                 ticker,
                 dates_key,
             )
-            return OptionGEXSummary.model_validate_json(stale).model_copy(
-                update={"is_stale": True}
-            )
+            return stale
         summary = summary.model_copy(update={"is_stale": False})
         await self.cache.set(key, summary.model_dump_json(), self.aggregate_ttl_seconds)
-        await self.cache.set_stale(
-            key, summary.model_dump_json(), self.stale_ttl_seconds
-        )
+        await self._store_stale_summary(key, summary)
         if self.cloud_sync and self.market_data.active_mode == "moomoo":
             asyncio.create_task(
                 self._push_aggregate_to_cloud(ticker, sorted_dates, summary)
@@ -173,7 +172,7 @@ class GEXService:
         try:
             summary = await self.market_data.get_gex_summary(ticker, days_to_expiration)
         except MarketDataUnavailableError:
-            stale = await self.cache.get_stale(key)
+            stale = await self._load_stale_summary(key)
             if stale is None:
                 raise
             logger.warning(
@@ -181,17 +180,13 @@ class GEXService:
                 ticker,
                 days_to_expiration,
             )
-            return OptionGEXSummary.model_validate_json(stale).model_copy(
-                update={"is_stale": True}
-            )
+            return stale
         summary = await self._apply_prior_wall_breakout(
             ticker, days_to_expiration, summary
         )
         summary = summary.model_copy(update={"is_stale": False})
         await self.cache.set(key, summary.model_dump_json(), self.ttl_seconds)
-        await self.cache.set_stale(
-            key, summary.model_dump_json(), self.stale_ttl_seconds
-        )
+        await self._store_stale_summary(key, summary)
         if self.market_data.active_mode == "moomoo":
             if self.cloud_sync:
                 asyncio.create_task(
@@ -202,6 +197,38 @@ class GEXService:
                     self._maybe_snapshot(ticker, days_to_expiration, summary)
                 )
         return summary
+
+    async def _load_stale_summary(self, key: str) -> OptionGEXSummary | None:
+        stale = await self.cache.get_stale(key)
+        if stale is not None:
+            return OptionGEXSummary.model_validate_json(stale).model_copy(
+                update={"is_stale": True}
+            )
+        if self.summary_cache_repository is None:
+            return None
+        try:
+            persisted = await self.summary_cache_repository.get(
+                key, self.stale_ttl_seconds
+            )
+        except Exception:
+            logger.warning("Persisted stale GEX cache read failed", exc_info=True)
+            return None
+        if persisted is None:
+            return None
+        return OptionGEXSummary.model_validate_json(persisted).model_copy(
+            update={"is_stale": True}
+        )
+
+    async def _store_stale_summary(
+        self, key: str, summary: OptionGEXSummary
+    ) -> None:
+        await self.cache.set_stale(key, summary.model_dump_json(), self.stale_ttl_seconds)
+        if self.summary_cache_repository is None:
+            return
+        try:
+            await self.summary_cache_repository.set(key, summary)
+        except Exception:
+            logger.warning("Persisted stale GEX cache write failed", exc_info=True)
 
     async def _apply_prior_wall_breakout(
         self, ticker: str, days_to_expiration: int, summary: OptionGEXSummary

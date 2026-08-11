@@ -362,6 +362,14 @@ class GEXSnapshotDBRecord(Base):
     )
 
 
+class GEXSummaryCacheRecord(Base):
+    __tablename__ = "gex_summary_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 _GEX_SNAPSHOT_LEVEL_COLUMNS = (
     "zero_gamma_strike",
     "call_wall_strike",
@@ -677,6 +685,34 @@ class GEXSnapshotRepository:
             if record is None:
                 return None
             return _snapshot_from_record(record)
+
+
+class GEXSummaryCacheRepository:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    async def set(self, cache_key: str, summary: OptionGEXSummary) -> None:
+        async with self.session_factory() as session:
+            record = await session.get(GEXSummaryCacheRecord, cache_key)
+            if record is None:
+                record = GEXSummaryCacheRecord(cache_key=cache_key)
+                session.add(record)
+            record.payload_json = summary.model_dump_json()
+            record.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    async def get(self, cache_key: str, max_age_seconds: int) -> str | None:
+        async with self.session_factory() as session:
+            record = await session.get(GEXSummaryCacheRecord, cache_key)
+            if record is None:
+                return None
+            updated_at = _as_utc(record.updated_at)
+            if updated_at is None:
+                return None
+            age = datetime.now(timezone.utc) - updated_at
+            if age.total_seconds() > max_age_seconds:
+                return None
+            return record.payload_json
 
 
 def _snapshot_from_record(record: GEXSnapshotDBRecord) -> GEXSnapshot:

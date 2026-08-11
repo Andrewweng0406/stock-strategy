@@ -13,6 +13,7 @@ from app.database import (
     Base,
     ChatRepository,
     GEXSnapshotRepository,
+    GEXSummaryCacheRepository,
     PlanRepository,
     PnlMismatchError,
     ProfileRepository,
@@ -245,6 +246,28 @@ async def test_gex_snapshot_repository_persists_stale_metadata() -> None:
 async def test_gex_snapshot_repository_get_snapshot_returns_none_when_missing() -> None:
     repo = GEXSnapshotRepository(await _session_factory())
     assert await repo.get_snapshot(999) is None
+
+
+@pytest.mark.asyncio
+async def test_gex_summary_cache_repository_round_trips_payload() -> None:
+    repo = GEXSummaryCacheRepository(await _session_factory())
+
+    await repo.set("gex:v1:AAPL:30", gex_summary(stock_price=101.0))
+    payload = await repo.get("gex:v1:AAPL:30", max_age_seconds=60)
+
+    assert payload is not None
+    restored = OptionGEXSummary.model_validate_json(payload)
+    assert restored.ticker == "AAPL"
+    assert restored.stock_price == 101.0
+    assert restored.is_stale is False
+
+
+@pytest.mark.asyncio
+async def test_gex_summary_cache_repository_rejects_expired_payload() -> None:
+    repo = GEXSummaryCacheRepository(await _session_factory())
+
+    await repo.set("gex:v1:AAPL:30", gex_summary())
+    assert await repo.get("gex:v1:AAPL:30", max_age_seconds=-1) is None
 
 
 @pytest.mark.asyncio

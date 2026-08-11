@@ -82,6 +82,19 @@ class _FakeSnapshotRepository:
         return len(self.saved)
 
 
+class _FakeSummaryCacheRepository:
+    def __init__(self) -> None:
+        self.values = {}
+        self.set_calls = []
+
+    async def set(self, cache_key: str, summary: OptionGEXSummary) -> None:
+        self.set_calls.append((cache_key, summary))
+        self.values[cache_key] = summary.model_dump_json()
+
+    async def get(self, cache_key: str, max_age_seconds: int) -> str | None:
+        return self.values.get(cache_key)
+
+
 def _snapshot(
     *,
     ticker: str = "AAPL",
@@ -235,6 +248,52 @@ async def test_get_summary_serves_stale_trusted_payload_after_market_data_failur
     assert fresh.is_stale is False
     assert stale.is_stale is True
     assert stale.ticker == "AAPL"
+    assert stale.stock_price == fresh.stock_price
+
+
+@pytest.mark.asyncio
+async def test_get_summary_writes_persisted_stale_cache_on_fresh_success() -> None:
+    persisted = _FakeSummaryCacheRepository()
+    service = GEXService(
+        market_data=_FakeMarketData("yfinance"),
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        stale_ttl_seconds=60,
+        summary_cache_repository=persisted,
+    )
+
+    await service.get_summary("AAPL", 6)
+
+    assert persisted.set_calls
+    cache_key, summary = persisted.set_calls[0]
+    assert cache_key == "gex:v1:AAPL:6"
+    assert summary.is_stale is False
+
+
+@pytest.mark.asyncio
+async def test_get_summary_serves_persisted_stale_payload_after_restart() -> None:
+    market_data = _FakeMarketData("yfinance")
+    persisted = _FakeSummaryCacheRepository()
+    warm_service = GEXService(
+        market_data=market_data,
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        stale_ttl_seconds=60,
+        summary_cache_repository=persisted,
+    )
+    fresh = await warm_service.get_summary("AAPL", 6)
+
+    market_data.fail_summary = True
+    restarted_service = GEXService(
+        market_data=market_data,
+        cache=InMemoryCache(),
+        ttl_seconds=1,
+        stale_ttl_seconds=60,
+        summary_cache_repository=persisted,
+    )
+    stale = await restarted_service._refresh("AAPL", 6)
+
+    assert stale.is_stale is True
     assert stale.stock_price == fresh.stock_price
 
 

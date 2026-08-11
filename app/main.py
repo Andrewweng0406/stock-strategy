@@ -29,6 +29,7 @@ from app.database import (
     Base,
     ChatRepository,
     GEXSnapshotRepository,
+    GEXSummaryCacheRepository,
     PlanRepository,
     PnlMismatchError,
     ProfileRepository,
@@ -167,6 +168,7 @@ async def lifespan(app: FastAPI):
         else None
     )
     snapshot_repository = GEXSnapshotRepository(session_factory)
+    summary_cache_repository = GEXSummaryCacheRepository(session_factory)
     trade_repository = TradeRepository(session_factory)
     trade_review_repository = TradeReviewRepository(session_factory)
     gex_service = GEXService(
@@ -179,6 +181,7 @@ async def lifespan(app: FastAPI):
         settings.snapshot_interval_seconds,
         settings.aggregate_cache_ttl_seconds,
         settings.gex_stale_cache_ttl_seconds,
+        summary_cache_repository=summary_cache_repository,
     )
     app.state.services = AppServices(
         engine=engine,
