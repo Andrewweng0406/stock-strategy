@@ -54,6 +54,20 @@ Opens on `http://127.0.0.1:5173` and talks to the backend via
 `VITE_API_BASE_URL`, which defaults to `http://127.0.0.1:8002`, the same port
 used by `stockschedule.py`.
 
+## Verify local Moomoo mode
+
+Before trusting local GEX levels, start Moomoo OpenD, keep `MOOMOO_ENABLED=true`,
+run the backend, then execute:
+
+```bash
+scripts/smoke-local-moomoo.sh
+```
+
+This is intentionally stricter than the cloud smoke: it fails unless
+`GET /health` reports `market_data_mode: "moomoo"`, then verifies real
+expirations and a Moomoo-backed GEX payload for `SMOKE_TICKER` (default
+`AAPL`). Override `BACKEND_URL` or `SMOKE_TICKER` when needed.
+
 ## Key environment variables
 
 See `.env.example` for the vars it lists, and `app/config.py` for the full
