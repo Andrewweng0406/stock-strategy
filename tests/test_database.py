@@ -152,6 +152,7 @@ async def test_gex_snapshot_repository_save_and_list() -> None:
     assert snapshots[0].data_source == "MOOMOO"
     assert snapshots[0].is_delayed is False
     assert snapshots[0].is_synthetic is False
+    assert snapshots[0].is_stale is False
     assert snapshots[1].underlying_price == 100.0
     assert all(s.ticker == "AAPL" for s in snapshots)
 
@@ -225,6 +226,19 @@ async def test_gex_snapshot_repository_save_snapshot_returns_id() -> None:
     assert fetched.data_source == "MOOMOO"
     assert fetched.is_delayed is False
     assert fetched.is_synthetic is False
+    assert fetched.is_stale is False
+
+
+@pytest.mark.asyncio
+async def test_gex_snapshot_repository_persists_stale_metadata() -> None:
+    repo = GEXSnapshotRepository(await _session_factory())
+    snapshot_id = await repo.save_snapshot(
+        "AAPL", 30, gex_summary().model_copy(update={"is_stale": True})
+    )
+
+    fetched = await repo.get_snapshot(snapshot_id)
+    assert fetched is not None
+    assert fetched.is_stale is True
 
 
 @pytest.mark.asyncio
@@ -704,13 +718,14 @@ def test_migration_adds_gex_snapshot_metadata_columns_to_legacy_table() -> None:
             for column in inspect(connection).get_columns("gex_snapshots")
         }
         row = connection.exec_driver_sql(
-            "SELECT data_source, is_delayed, is_synthetic FROM gex_snapshots"
+            "SELECT data_source, is_delayed, is_synthetic, is_stale FROM gex_snapshots"
         ).one()
 
     assert columns["data_source"]["nullable"] is False
     assert columns["is_delayed"]["nullable"] is False
     assert columns["is_synthetic"]["nullable"] is False
-    assert row == ("UNKNOWN", 0, 0)
+    assert columns["is_stale"]["nullable"] is False
+    assert row == ("UNKNOWN", 0, 0, 0)
 
 
 @pytest.mark.asyncio

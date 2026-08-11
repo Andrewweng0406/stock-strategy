@@ -408,6 +408,7 @@ class GEXSnapshot(StrictModel):
     data_source: MarketDataSource = MarketDataSource.UNKNOWN
     is_delayed: bool = False
     is_synthetic: bool = False
+    is_stale: bool = False
 
 
 class GEXSnapshotList(StrictModel):

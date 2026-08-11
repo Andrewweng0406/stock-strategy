@@ -367,6 +367,7 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
         data_source=MarketDataSource.YFINANCE,
         is_delayed=True,
         is_synthetic=False,
+        is_stale=True,
     )
 
     ai_feedback, key_takeaways = await orchestrator.review_trade(
@@ -387,6 +388,7 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
     assert '"data_source": "YFINANCE"' in fake_responses.request["instructions"]
     assert '"is_delayed": true' in fake_responses.request["instructions"]
     assert '"is_synthetic": false' in fake_responses.request["instructions"]
+    assert '"is_stale": true' in fake_responses.request["instructions"]
     assert ai_feedback == "Exit respected the plan."
     assert key_takeaways == ["Booked profit near target", "Stuck to the stop"]
 

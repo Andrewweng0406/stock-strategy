@@ -553,6 +553,7 @@ precise, probability-aware advice from the authoritative market context below.
             entry_gex_context["data_source"] = entry_snapshot.data_source.value
             entry_gex_context["is_delayed"] = entry_snapshot.is_delayed
             entry_gex_context["is_synthetic"] = entry_snapshot.is_synthetic
+            entry_gex_context["is_stale"] = entry_snapshot.is_stale
         context = json.dumps(
             {
                 "ticker": trade.ticker,

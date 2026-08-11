@@ -352,10 +352,13 @@ class GEXSnapshotDBRecord(Base):
         server_default=MarketDataSource.UNKNOWN.value,
     )
     is_delayed: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0"
+        Boolean, default=False, server_default="false"
     )
     is_synthetic: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0"
+        Boolean, default=False, server_default="false"
+    )
+    is_stale: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
     )
 
 
@@ -368,6 +371,7 @@ _GEX_SNAPSHOT_METADATA_COLUMNS = (
     "data_source",
     "is_delayed",
     "is_synthetic",
+    "is_stale",
 )
 _GEX_SNAPSHOT_COLUMNS = (
     "id",
@@ -446,6 +450,11 @@ def _ensure_gex_snapshot_metadata_columns(connection, table: str) -> None:
     if "is_synthetic" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN is_synthetic BOOLEAN "
+            f"NOT NULL DEFAULT false"
+        )
+    if "is_stale" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN is_stale BOOLEAN "
             f"NOT NULL DEFAULT false"
         )
 
@@ -607,6 +616,7 @@ class GEXSnapshotRepository:
                 data_source=summary.data_source.value,
                 is_delayed=summary.is_delayed,
                 is_synthetic=summary.is_synthetic,
+                is_stale=summary.is_stale,
             )
             session.add(record)
             await session.commit()
@@ -684,6 +694,7 @@ def _snapshot_from_record(record: GEXSnapshotDBRecord) -> GEXSnapshot:
         data_source=MarketDataSource(record.data_source),
         is_delayed=record.is_delayed,
         is_synthetic=record.is_synthetic,
+        is_stale=record.is_stale,
     )
 
 
