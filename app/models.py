@@ -389,6 +389,9 @@ class GEXSnapshot(StrictModel):
     net_gex: float
     iv_rank: float
     gex_status: GEXStatus
+    data_source: MarketDataSource = MarketDataSource.UNKNOWN
+    is_delayed: bool = False
+    is_synthetic: bool = False
 
 
 class GEXSnapshotList(StrictModel):

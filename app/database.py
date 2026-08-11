@@ -25,6 +25,7 @@ from app.models import (
     ConversationSummary,
     GEXSnapshot,
     GEXStatus,
+    MarketDataSource,
     OptionGEXSummary,
     PlanStatus,
     Trade,
@@ -345,12 +346,28 @@ class GEXSnapshotDBRecord(Base):
     net_gex: Mapped[float] = mapped_column(Float)
     iv_rank: Mapped[float] = mapped_column(Float)
     gex_status: Mapped[str] = mapped_column(String(16))
+    data_source: Mapped[str] = mapped_column(
+        String(16),
+        default=MarketDataSource.UNKNOWN.value,
+        server_default=MarketDataSource.UNKNOWN.value,
+    )
+    is_delayed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    is_synthetic: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
 
 
 _GEX_SNAPSHOT_LEVEL_COLUMNS = (
     "zero_gamma_strike",
     "call_wall_strike",
     "put_wall_strike",
+)
+_GEX_SNAPSHOT_METADATA_COLUMNS = (
+    "data_source",
+    "is_delayed",
+    "is_synthetic",
 )
 _GEX_SNAPSHOT_COLUMNS = (
     "id",
@@ -362,6 +379,7 @@ _GEX_SNAPSHOT_COLUMNS = (
     "net_gex",
     "iv_rank",
     "gex_status",
+    *_GEX_SNAPSHOT_METADATA_COLUMNS,
 )
 
 
@@ -380,6 +398,8 @@ def _row_count(connection, table: str) -> int:
 
 
 def _copy_rows(connection, source: str, target: str) -> None:
+    _ensure_gex_snapshot_metadata_columns(connection, source)
+    _ensure_gex_snapshot_metadata_columns(connection, target)
     column_list = ", ".join(_GEX_SNAPSHOT_COLUMNS)
     connection.exec_driver_sql(
         f"INSERT INTO {target} ({column_list}) SELECT {column_list} FROM {source}"
@@ -405,6 +425,29 @@ def _verify_copy(connection, source: str, target: str) -> None:
 
 def _create_gex_snapshots_table(connection) -> None:
     GEXSnapshotDBRecord.__table__.create(connection)
+
+
+def _ensure_gex_snapshot_metadata_columns(connection, table: str) -> None:
+    if table not in set(inspect(connection).get_table_names()):
+        return
+    columns = {
+        column["name"]: column for column in inspect(connection).get_columns(table)
+    }
+    if "data_source" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN data_source VARCHAR(16) "
+            f"NOT NULL DEFAULT '{MarketDataSource.UNKNOWN.value}'"
+        )
+    if "is_delayed" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN is_delayed BOOLEAN "
+            f"NOT NULL DEFAULT 0"
+        )
+    if "is_synthetic" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN is_synthetic BOOLEAN "
+            f"NOT NULL DEFAULT 0"
+        )
 
 
 def _mark_backup_done(connection, backup: str) -> None:
@@ -502,6 +545,10 @@ def relax_gex_snapshot_level_columns(connection) -> None:
     columns = {
         column["name"]: column for column in inspect(connection).get_columns(table)
     }
+    _ensure_gex_snapshot_metadata_columns(connection, table)
+    columns = {
+        column["name"]: column for column in inspect(connection).get_columns(table)
+    }
     stale = [
         name
         for name in _GEX_SNAPSHOT_LEVEL_COLUMNS
@@ -556,6 +603,9 @@ class GEXSnapshotRepository:
                 net_gex=summary.net_gex,
                 iv_rank=summary.iv_rank,
                 gex_status=summary.gex_status.value,
+                data_source=summary.data_source.value,
+                is_delayed=summary.is_delayed,
+                is_synthetic=summary.is_synthetic,
             )
             session.add(record)
             await session.commit()
@@ -594,6 +644,9 @@ class GEXSnapshotRepository:
                     net_gex=record.net_gex,
                     iv_rank=record.iv_rank,
                     gex_status=GEXStatus(record.gex_status),
+                    data_source=MarketDataSource(record.data_source),
+                    is_delayed=record.is_delayed,
+                    is_synthetic=record.is_synthetic,
                 )
                 for record in records
             ]
@@ -614,6 +667,9 @@ class GEXSnapshotRepository:
                 net_gex=record.net_gex,
                 iv_rank=record.iv_rank,
                 gex_status=GEXStatus(record.gex_status),
+                data_source=MarketDataSource(record.data_source),
+                is_delayed=record.is_delayed,
+                is_synthetic=record.is_synthetic,
             )
 
 

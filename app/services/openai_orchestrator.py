@@ -546,6 +546,9 @@ precise, probability-aware advice from the authoritative market context below.
                 if value is not None
             }
             entry_gex_context["gex_status"] = entry_snapshot.gex_status.value
+            entry_gex_context["data_source"] = entry_snapshot.data_source.value
+            entry_gex_context["is_delayed"] = entry_snapshot.is_delayed
+            entry_gex_context["is_synthetic"] = entry_snapshot.is_synthetic
         context = json.dumps(
             {
                 "ticker": trade.ticker,

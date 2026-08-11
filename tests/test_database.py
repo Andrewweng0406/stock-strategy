@@ -22,6 +22,7 @@ from app.database import (
 )
 from app.models import (
     GEXStatus,
+    MarketDataSource,
     OptionGEXSummary,
     PlanStatus,
     TradeClose,
@@ -68,6 +69,9 @@ def gex_summary(stock_price: float = 100.0) -> OptionGEXSummary:
         iv_rank=40.0,
         net_gex=1_000_000.0,
         gex_status=GEXStatus.POS_GAMMA,
+        data_source=MarketDataSource.MOOMOO,
+        is_delayed=False,
+        is_synthetic=False,
     )
 
 
@@ -144,6 +148,9 @@ async def test_gex_snapshot_repository_save_and_list() -> None:
     assert len(snapshots) == 2
     # Most recent first.
     assert snapshots[0].underlying_price == 101.0
+    assert snapshots[0].data_source == "MOOMOO"
+    assert snapshots[0].is_delayed is False
+    assert snapshots[0].is_synthetic is False
     assert snapshots[1].underlying_price == 100.0
     assert all(s.ticker == "AAPL" for s in snapshots)
 
@@ -173,6 +180,9 @@ async def test_gex_snapshot_repository_save_snapshot_returns_id() -> None:
     assert fetched is not None
     assert fetched.ticker == "AAPL"
     assert fetched.zero_gamma_strike == 95.0
+    assert fetched.data_source == "MOOMOO"
+    assert fetched.is_delayed is False
+    assert fetched.is_synthetic is False
 
 
 @pytest.mark.asyncio
@@ -631,6 +641,36 @@ def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() ->
     ]
 
 
+def test_migration_adds_gex_snapshot_metadata_columns_to_legacy_table() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(LEGACY_GEX_SNAPSHOTS_DDL)
+        connection.exec_driver_sql(
+            "INSERT INTO gex_snapshots "
+            "(id, ticker, days_to_expiration, captured_at, underlying_price, "
+            "zero_gamma_strike, call_wall_strike, put_wall_strike, net_gex, "
+            "iv_rank, gex_status) VALUES "
+            "(1, 'AAPL', 30, '2026-08-01 00:00:00', 100.0, 95.0, 110.0, 90.0, "
+            "1000000.0, 40.0, 'POS_GAMMA')"
+        )
+
+        relax_gex_snapshot_level_columns(connection)
+        relax_gex_snapshot_level_columns(connection)
+
+        columns = {
+            column["name"]: column
+            for column in inspect(connection).get_columns("gex_snapshots")
+        }
+        row = connection.exec_driver_sql(
+            "SELECT data_source, is_delayed, is_synthetic FROM gex_snapshots"
+        ).one()
+
+    assert columns["data_source"]["nullable"] is False
+    assert columns["is_delayed"]["nullable"] is False
+    assert columns["is_synthetic"]["nullable"] is False
+    assert row == ("UNKNOWN", 0, 0)
+
+
 @pytest.mark.asyncio
 async def test_migration_relaxes_legacy_not_null_gex_level_columns() -> None:
     """A database created before the GEX levels became nullable keeps its
@@ -648,7 +688,10 @@ async def test_migration_relaxes_legacy_not_null_gex_level_columns() -> None:
             "CREATE INDEX ix_gex_snapshots_ticker ON gex_snapshots (ticker)"
         )
         await connection.exec_driver_sql(
-            "INSERT INTO gex_snapshots VALUES "
+            "INSERT INTO gex_snapshots "
+            "(id, ticker, days_to_expiration, captured_at, underlying_price, "
+            "zero_gamma_strike, call_wall_strike, put_wall_strike, net_gex, "
+            "iv_rank, gex_status) VALUES "
             "(1, 'AAPL', 30, '2026-08-01 00:00:00', 100.0, 95.0, 110.0, 90.0, "
             "1000000.0, 40.0, 'POS_GAMMA')"
         )
@@ -695,7 +738,10 @@ def _legacy_sqlite_engine(path, rows: int = 252):
         )
         for index in range(rows):
             connection.exec_driver_sql(
-                "INSERT INTO gex_snapshots VALUES "
+                "INSERT INTO gex_snapshots "
+                "(id, ticker, days_to_expiration, captured_at, underlying_price, "
+                "zero_gamma_strike, call_wall_strike, put_wall_strike, net_gex, "
+                "iv_rank, gex_status) VALUES "
                 f"({index + 1}, 'AAPL', 30, '2026-08-01 00:00:00', 100.0, 95.0, "
                 "110.0, 90.0, 1000000.0, 40.0, 'POS_GAMMA')"
             )
@@ -806,7 +852,10 @@ def test_migration_leaves_a_completed_database_untouched(tmp_path) -> None:
 
     with engine.begin() as connection:
         connection.exec_driver_sql(
-            "INSERT INTO gex_snapshots VALUES "
+            "INSERT INTO gex_snapshots "
+            "(id, ticker, days_to_expiration, captured_at, underlying_price, "
+            "zero_gamma_strike, call_wall_strike, put_wall_strike, net_gex, "
+            "iv_rank, gex_status) VALUES "
             "(9999, 'MSFT', 30, '2026-08-02 00:00:00', 100.0, NULL, NULL, NULL, "
             "-5.0, 40.0, 'NEG_GAMMA')"
         )
@@ -866,7 +915,10 @@ def test_migration_marks_a_pre_existing_completed_backup_done_without_recopying(
     # Real post-migration activity: a row the pre-fix backup doesn't have.
     with engine.begin() as connection:
         connection.exec_driver_sql(
-            "INSERT INTO gex_snapshots VALUES "
+            "INSERT INTO gex_snapshots "
+            "(id, ticker, days_to_expiration, captured_at, underlying_price, "
+            "zero_gamma_strike, call_wall_strike, put_wall_strike, net_gex, "
+            "iv_rank, gex_status) VALUES "
             "(9999, 'MSFT', 30, '2026-08-02 00:00:00', 100.0, NULL, NULL, NULL, "
             "-5.0, 40.0, 'NEG_GAMMA')"
         )

@@ -11,6 +11,7 @@ from app.models import (
     ChatRequest,
     GEXSnapshot,
     GEXStatus,
+    MarketDataSource,
     OptionGEXSummary,
     RiskProfile,
     Trade,
@@ -345,6 +346,9 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
         net_gex=1_000_000.0,
         iv_rank=40.0,
         gex_status=GEXStatus.POS_GAMMA,
+        data_source=MarketDataSource.YFINANCE,
+        is_delayed=True,
+        is_synthetic=False,
     )
 
     ai_feedback, key_takeaways = await orchestrator.review_trade(
@@ -362,6 +366,9 @@ async def test_review_trade_forces_tool_and_returns_feedback() -> None:
     assert '"option_type": "CALL"' in fake_responses.request["instructions"]
     assert '"strike_price": 100.0' in fake_responses.request["instructions"]
     assert '"contract_symbol": "AAPL990814C00100000"' in fake_responses.request["instructions"]
+    assert '"data_source": "YFINANCE"' in fake_responses.request["instructions"]
+    assert '"is_delayed": true' in fake_responses.request["instructions"]
+    assert '"is_synthetic": false' in fake_responses.request["instructions"]
     assert ai_feedback == "Exit respected the plan."
     assert key_takeaways == ["Booked profit near target", "Stuck to the stop"]
 
