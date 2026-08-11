@@ -107,3 +107,17 @@ pull request: backend compile + pytest, frontend production build, Playwright
 browser regressions, and dependency audit. CI deliberately disables Moomoo,
 yfinance fallback, Redis, and synthetic market data so tests cannot pass by
 depending on a local broker session, a network data source, or fake levels.
+
+## Production smoke
+
+Before or after a Railway release, run the read-only production gate:
+
+```bash
+scripts/smoke-production.sh
+```
+
+It verifies the backend is healthy and not serving `mock` / `unavailable`
+market data, fetches a real GEX payload, confirms the CloudSync write endpoint
+rejects unauthenticated requests, and checks the frontend shell serves built
+assets. Override `BACKEND_URL`, `FRONTEND_URL`, `SMOKE_TICKER`, or `SMOKE_DTE`
+when testing another environment.

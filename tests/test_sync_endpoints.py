@@ -26,6 +26,16 @@ def test_sync_gex_rejects_missing_token() -> None:
     assert response.status_code == 403
 
 
+def test_sync_gex_rejects_missing_token_before_payload_validation() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sync/gex",
+            json={"not": "the sync schema"},
+        )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Invalid sync token"
+
+
 def test_sync_gex_round_trips_through_gex_endpoint(monkeypatch) -> None:
     monkeypatch.setattr(settings, "sync_token", "test-sync-token")
     with TestClient(app) as client:

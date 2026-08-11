@@ -229,6 +229,27 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 
+def _sync_token_is_valid(x_sync_token: str) -> bool:
+    return bool(settings.sync_token) and hmac.compare_digest(
+        x_sync_token, settings.sync_token
+    )
+
+
+@app.middleware("http")
+async def reject_unauthorized_sync_before_body_validation(request: Request, call_next):
+    """CloudSync is a write surface. Reject bad tokens before request-body
+    validation so unauthenticated callers cannot probe sync payload schemas.
+    """
+    path = request.url.path
+    if path == "/api/v1/sync/gex" or path.startswith("/api/v1/sync/"):
+        if not _sync_token_is_valid(request.headers.get("x-sync-token", "")):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid sync token"},
+            )
+    return await call_next(request)
+
+
 @app.exception_handler(MarketDataUnavailableError)
 async def market_data_unavailable_handler(
     request: Request, exc: MarketDataUnavailableError
@@ -400,9 +421,7 @@ async def sync_gex(
     services: Services,
     x_sync_token: str = Header(default=""),
 ) -> dict[str, str]:
-    if not settings.sync_token or not hmac.compare_digest(
-        x_sync_token, settings.sync_token
-    ):
+    if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = payload.ticker.strip().upper()
     key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
@@ -423,9 +442,7 @@ async def sync_expirations(
     The cloud can still use yfinance as a delayed source, but synced
     expirations keep the frontend aligned with the real local GEX snapshots.
     """
-    if not settings.sync_token or not hmac.compare_digest(
-        x_sync_token, settings.sync_token
-    ):
+    if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = payload.ticker.strip().upper()
     key = f"expirations:v1:{ticker}"
@@ -450,9 +467,7 @@ async def sync_gex_aggregate(
     cloud deployment never receives local Moomoo-backed aggregate data, even
     when single-expiration views are being synced.
     """
-    if not settings.sync_token or not hmac.compare_digest(
-        x_sync_token, settings.sync_token
-    ):
+    if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
     ticker = payload.ticker.strip().upper()
     dates_key = ",".join(d.isoformat() for d in sorted(set(payload.expiration_dates)))
