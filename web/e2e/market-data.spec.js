@@ -14,6 +14,7 @@ const baseSummary = {
   data_source: "MOOMOO",
   is_delayed: false,
   is_synthetic: false,
+  is_stale: false,
   calculated_at: "2026-08-10T12:00:00Z",
   pinning: {
     pin_strike: 230,
