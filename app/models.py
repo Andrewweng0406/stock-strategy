@@ -144,6 +144,12 @@ class ChatContext(StrictModel):
     expiration_dates: list[date] = Field(default_factory=list, max_length=6)
     history: list[ChatMessage] = Field(default_factory=list, max_length=30)
 
+    @model_validator(mode="after")
+    def aggregate_requires_expiration_dates(self) -> "ChatContext":
+        if self.aggregate and not self.expiration_dates:
+            raise ValueError("aggregate chat context requires expiration_dates")
+        return self
+
 
 class ChatRequest(StrictModel):
     user_message: str = Field(min_length=1, max_length=20_000)

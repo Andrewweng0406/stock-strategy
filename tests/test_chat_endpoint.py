@@ -224,3 +224,23 @@ def test_chat_in_aggregate_mode_uses_the_combined_summary_not_a_single_dte(
     assert context["gex_summary"]["stock_price"] == 250.0
     assert context["gex_summary"]["call_wall"] == 260.0
     assert context["aggregated_across_expirations"] == dates
+
+
+def test_chat_aggregate_context_requires_expiration_dates(monkeypatch) -> None:
+    suffix = uuid4().hex[:8].upper()
+    ticker = f"CHATAGGEMPTY{suffix}"
+    payload = _chat_payload(
+        f"agg-empty-user-{suffix}",
+        f"agg-empty-conv-{suffix}",
+        ticker,
+        "整體怎麼看",
+    )
+    payload["context"]["aggregate"] = True
+    payload["context"]["expiration_dates"] = []
+
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, ticker, dte=30)
+        response = client.post("/api/v1/chat", json=payload)
+
+    assert response.status_code == 422
+    assert "aggregate chat context requires expiration_dates" in response.text
