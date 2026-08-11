@@ -426,6 +426,39 @@ def test_close_trade_rejects_already_closed(monkeypatch) -> None:
     assert response.status_code == 409
 
 
+def test_close_trade_rejects_exit_before_entry(monkeypatch) -> None:
+    entry_date = datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc)
+    with TestClient(app) as client:
+        _seed_cache(client, monkeypatch, "TJTESTTIME")
+        create_response = client.post(
+            "/api/v1/trades",
+            json={
+                "user_id": "user-time",
+                "ticker": "TJTESTTIME",
+                "strategy_type": "Long Call",
+                "entry_price": 100.0,
+                "position_size": 1,
+                "entry_date": entry_date.isoformat(),
+                "expiration_date": _default_expiration_date(),
+                "option_type": "CALL",
+                "strike_price": 100.0,
+            },
+        )
+        assert create_response.status_code == 200
+        trade = create_response.json()
+
+        response = client.put(
+            f"/api/v1/trades/{trade['id']}?user_id=user-time",
+            json={
+                "exit_price": 120.0,
+                "exit_date": datetime(2026, 8, 10, 14, 59, tzinfo=timezone.utc).isoformat(),
+                "pnl": 2000.0,
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "exit_date cannot be before entry_date"
+
+
 def test_close_trade_rejects_pnl_that_disagrees_with_the_fill(monkeypatch) -> None:
     with TestClient(app) as client:
         _seed_cache(client, monkeypatch, "TJTESTPNL")

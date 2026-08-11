@@ -32,6 +32,7 @@ from app.database import (
     PlanRepository,
     PnlMismatchError,
     ProfileRepository,
+    TradeDateOrderError,
     TradeRepository,
     TradeReviewRepository,
     ensure_trade_metadata_columns,
@@ -633,6 +634,8 @@ async def close_trade(
     except PnlMismatchError as exc:
         # Checked before the generic ValueError below — PnlMismatchError is
         # a subclass of it, and the two map to different status codes.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TradeDateOrderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

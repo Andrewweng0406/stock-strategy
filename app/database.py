@@ -819,6 +819,10 @@ class PnlMismatchError(ValueError):
     """
 
 
+class TradeDateOrderError(ValueError):
+    """Trade close timestamp precedes the recorded entry timestamp."""
+
+
 # How far a submitted pnl may drift from the value entry_price/exit_price/
 # position_size/credit_debit imply before it's rejected outright. This is
 # deliberately looser than the frontend's own mismatch *warning* threshold
@@ -942,6 +946,11 @@ class TradeRepository:
                 raise PermissionError("The trade belongs to a different user")
             if record.status == TradeStatus.CLOSED.value:
                 raise ValueError("Trade is already closed")
+            entry_date = _as_utc(record.entry_date)
+            exit_date = _as_utc(close.exit_date)
+            assert entry_date is not None and exit_date is not None
+            if exit_date < entry_date:
+                raise TradeDateOrderError("exit_date cannot be before entry_date")
             if not _pnl_is_plausible(
                 close.pnl,
                 record.entry_price,
