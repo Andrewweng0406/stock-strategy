@@ -441,12 +441,12 @@ def _ensure_gex_snapshot_metadata_columns(connection, table: str) -> None:
     if "is_delayed" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN is_delayed BOOLEAN "
-            f"NOT NULL DEFAULT 0"
+            f"NOT NULL DEFAULT false"
         )
     if "is_synthetic" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN is_synthetic BOOLEAN "
-            f"NOT NULL DEFAULT 0"
+            f"NOT NULL DEFAULT false"
         )
 
 
