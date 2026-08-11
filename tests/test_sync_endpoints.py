@@ -51,6 +51,24 @@ def test_sync_gex_round_trips_through_gex_endpoint(monkeypatch) -> None:
     assert gex_response.json()["stock_price"] == 250.0
 
 
+def test_sync_gex_rejects_summary_ticker_mismatch(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sync/gex",
+            json={
+                "ticker": "AAPL",
+                "days_to_expiration": 30,
+                "summary": _summary_payload("TSLA"),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "summary ticker TSLA does not match sync ticker AAPL"
+    )
+
+
 def test_sync_expirations_rejects_missing_token() -> None:
     with TestClient(app) as client:
         response = client.post(
@@ -117,6 +135,24 @@ def test_sync_gex_aggregate_round_trips_through_aggregate_endpoint(monkeypatch) 
         )
     assert aggregate_response.status_code == 200
     assert aggregate_response.json()["stock_price"] == 250.0
+
+
+def test_sync_gex_aggregate_rejects_summary_ticker_mismatch(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sync_token", "test-sync-token")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sync/gex/aggregate",
+            json={
+                "ticker": "AAPL",
+                "expiration_dates": ["2026-08-14", "2026-08-21"],
+                "summary": _summary_payload("TSLA"),
+            },
+            headers={"X-Sync-Token": "test-sync-token"},
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "summary ticker TSLA does not match sync ticker AAPL"
+    )
 
 
 def test_sync_gex_aggregate_cache_key_ignores_date_order(monkeypatch) -> None:

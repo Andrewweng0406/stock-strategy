@@ -237,6 +237,20 @@ def _sync_token_is_valid(x_sync_token: str) -> bool:
     )
 
 
+def _require_synced_summary_ticker(ticker: str, summary: OptionGEXSummary) -> str:
+    normalized = ticker.strip().upper()
+    summary_ticker = summary.ticker.strip().upper()
+    if summary_ticker != normalized:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"summary ticker {summary_ticker} does not match sync ticker "
+                f"{normalized}"
+            ),
+        )
+    return normalized
+
+
 def _attach_security_headers(response: Response) -> Response:
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -458,7 +472,7 @@ async def sync_gex(
 ) -> dict[str, str]:
     if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
-    ticker = payload.ticker.strip().upper()
+    ticker = _require_synced_summary_ticker(payload.ticker, payload.summary)
     key = f"gex:v1:{ticker}:{payload.days_to_expiration}"
     await services.cache.set(
         key, payload.summary.model_dump_json(), settings.cache_ttl_seconds
@@ -504,7 +518,7 @@ async def sync_gex_aggregate(
     """
     if not _sync_token_is_valid(x_sync_token):
         raise HTTPException(status_code=403, detail="Invalid sync token")
-    ticker = payload.ticker.strip().upper()
+    ticker = _require_synced_summary_ticker(payload.ticker, payload.summary)
     dates_key = ",".join(d.isoformat() for d in sorted(set(payload.expiration_dates)))
     key = f"gex:agg:v1:{ticker}:{dates_key}"
     await services.cache.set(
