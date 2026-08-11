@@ -15,5 +15,10 @@ def test_health_reports_cloud_sync_disabled_without_secrets(monkeypatch) -> None
     body = response.json()
     assert body["status"] == "ok"
     assert "market_data_mode" in body
-    assert body["cloud_sync"] == {"enabled": False}
+    assert body["cloud_sync"] == {
+        "enabled": False,
+        "last_success_at": None,
+        "last_error_at": None,
+        "last_error": None,
+    }
     assert "token" not in str(body).lower()

@@ -27,10 +27,18 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
 
 status = payload.get("status")
 mode = payload.get("market_data_mode")
+cloud_sync = payload.get("cloud_sync")
 if status != "ok":
     raise SystemExit(f"backend health status is {status!r}")
 if mode in {"mock", "unavailable", None, ""}:
     raise SystemExit(f"backend market_data_mode is not production-safe: {mode!r}")
+if not isinstance(cloud_sync, dict):
+    raise SystemExit(f"cloud_sync health is not an object: {cloud_sync!r}")
+expected_sync_keys = {"enabled", "last_success_at", "last_error_at", "last_error"}
+if set(cloud_sync) != expected_sync_keys:
+    raise SystemExit(f"cloud_sync health keys changed: {sorted(cloud_sync)}")
+if "token" in json.dumps(payload).lower():
+    raise SystemExit("backend health response appears to expose token material")
 print(f"backend market data mode: {mode}")
 PY
 

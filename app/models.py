@@ -172,10 +172,19 @@ class SyncAggregateGexRequest(StrictModel):
     summary: OptionGEXSummary
 
 
+class CloudSyncHealth(StrictModel):
+    enabled: bool
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
+
+
 class HealthResponse(StrictModel):
     status: str
     market_data_mode: str
-    cloud_sync: dict[str, str | bool | None] | None = None
+    cloud_sync: CloudSyncHealth = Field(
+        default_factory=lambda: CloudSyncHealth(enabled=False)
+    )
 
 
 class ChatMessageRecord(StrictModel):

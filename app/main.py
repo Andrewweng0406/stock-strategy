@@ -50,6 +50,7 @@ from app.models import (
     ChatResponse,
     ConversationList,
     ConversationMessages,
+    CloudSyncHealth,
     ExpirationInfo,
     ExpirationList,
     GEXSnapshotList,
@@ -273,7 +274,7 @@ async def health(services: Services) -> HealthResponse:
         cloud_sync=(
             services.gex_service.cloud_sync.status()
             if services.gex_service.cloud_sync
-            else {"enabled": False}
+            else CloudSyncHealth(enabled=False)
         ),
     )
 

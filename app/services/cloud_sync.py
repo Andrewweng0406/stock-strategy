@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.models import ExpirationInfo, OptionGEXSummary
+from app.models import CloudSyncHealth, ExpirationInfo, OptionGEXSummary
 
 
 logger = logging.getLogger(__name__)
@@ -24,15 +24,13 @@ class CloudSync:
         self.last_error_at: datetime | None = None
         self.last_error: str | None = None
 
-    def status(self) -> dict[str, str | bool | None]:
-        return {
-            "enabled": True,
-            "last_success_at": (
-                self.last_success_at.isoformat() if self.last_success_at else None
-            ),
-            "last_error_at": self.last_error_at.isoformat() if self.last_error_at else None,
-            "last_error": self.last_error,
-        }
+    def status(self) -> CloudSyncHealth:
+        return CloudSyncHealth(
+            enabled=True,
+            last_success_at=self.last_success_at,
+            last_error_at=self.last_error_at,
+            last_error=self.last_error,
+        )
 
     def _record_success(self) -> None:
         self.last_success_at = datetime.now(timezone.utc)

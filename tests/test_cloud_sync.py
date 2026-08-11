@@ -42,11 +42,11 @@ async def test_cloud_sync_status_records_success(monkeypatch) -> None:
     await sync.push("AAPL", 30, _summary())
 
     status = sync.status()
-    assert status["enabled"] is True
-    assert status["last_success_at"] is not None
-    assert status["last_error_at"] is None
-    assert status["last_error"] is None
-    assert "secret" not in str(status)
+    assert status.enabled is True
+    assert status.last_success_at is not None
+    assert status.last_error_at is None
+    assert status.last_error is None
+    assert "secret" not in str(status.model_dump())
 
 
 @pytest.mark.asyncio
@@ -67,9 +67,10 @@ async def test_cloud_sync_status_records_failure_without_raising(monkeypatch) ->
     await sync.push_aggregate("AAPL", [date(2026, 8, 14)], _summary())
 
     status = sync.status()
-    assert status["enabled"] is True
-    assert status["last_success_at"] is None
-    assert status["last_error_at"] is not None
-    assert "ConnectError" in status["last_error"]
-    assert "cloud offline" in status["last_error"]
-    assert "secret" not in str(status)
+    assert status.enabled is True
+    assert status.last_success_at is None
+    assert status.last_error_at is not None
+    assert status.last_error is not None
+    assert "ConnectError" in status.last_error
+    assert "cloud offline" in status.last_error
+    assert "secret" not in str(status.model_dump())
