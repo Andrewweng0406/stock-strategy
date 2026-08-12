@@ -7,6 +7,8 @@ const MONO =
   '[font-family:ui-monospace,"SF_Mono","JetBrains_Mono","IBM_Plex_Mono",Menlo,Consolas,monospace]';
 
 const COMMON_STRATEGY_TYPES = [
+  "WEEKLY_CSP",
+  "DEFI_LP",
   "Long Call",
   "Long Put",
   "Bull Call Debit Spread",
@@ -35,6 +37,13 @@ const OPTION_TYPES = [
   { value: "MULTI_LEG", label: "Multi-leg" },
 ];
 
+const WHEEL_STAGES = [
+  { value: "CSP", label: "CSP 賣 Put" },
+  { value: "ASSIGNED_STOCK", label: "已指派接股" },
+  { value: "COVERED_CALL", label: "Covered Call" },
+  { value: "COMPLETED", label: "循環完成" },
+];
+
 // One options contract controls 100 shares. The backend uses the same
 // multiplier when it derives pnl_pct (pnl / (entry_price * 100 * size) * 100),
 // so the close form's derived figures have to match it exactly.
@@ -50,6 +59,14 @@ function parsePositiveNumber(raw) {
   if (s === "") return null;
   const n = Number(s);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Finite and >= 0, else null. For yield targets. */
+function parseNonNegativeNumber(raw) {
+  const s = String(raw ?? "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /** Finite (negative allowed), else null. For PnL. */
@@ -79,7 +96,7 @@ function parsePositiveInt(raw) {
  * mis-inferred, which is why the applied convention is always labelled in the
  * UI and the manual PnL field stays authoritative.
  */
-const CREDIT_STRATEGY_RE = /credit|covered\s*call|cash[-\s]?secured|iron\s*condor/i;
+const CREDIT_STRATEGY_RE = /weekly_csp|credit|covered\s*call|cash[-\s]?secured|iron\s*condor/i;
 
 function isCreditStrategy(strategyType) {
   return CREDIT_STRATEGY_RE.test(String(strategyType || ""));
@@ -87,6 +104,7 @@ function isCreditStrategy(strategyType) {
 
 function inferDirection(strategyType) {
   const text = String(strategyType || "").toLowerCase();
+  if (/weekly_csp|cash[-\s]?secured/.test(text)) return "LONG";
   if (/(iron\s*condor|butterfly|calendar)/i.test(text)) return "NEUTRAL";
   // "bull" must be checked before the generic short/put match below — a
   // Bull Put Credit Spread is bullish despite containing "put".
@@ -101,6 +119,7 @@ function inferCreditDebit(strategyType) {
 
 function inferOptionType(strategyType) {
   const text = String(strategyType || "").toLowerCase();
+  if (/weekly_csp|cash[-\s]?secured/.test(text)) return "PUT";
   if (/(spread|condor|butterfly|calendar|straddle|strangle|ratio)/i.test(text)) {
     return "MULTI_LEG";
   }
@@ -118,6 +137,10 @@ function creditDebitLabel(value) {
 
 function optionTypeLabel(value) {
   return OPTION_TYPES.find((option) => option.value === value)?.label || value || "—";
+}
+
+function wheelStageLabel(value) {
+  return WHEEL_STAGES.find((option) => option.value === value)?.label || value || "—";
 }
 
 /**
@@ -210,24 +233,8 @@ function defaultLegs(expirationDate = "") {
   ];
 }
 
-function earliestIsoDate(values) {
-  const dates = values
-    .map((value) => String(value || "").trim())
-    .filter(Boolean)
-    .sort();
-  return dates[0] || null;
-}
-
-export default function TradeJournalPanel({ userId, ticker, expirationDate, onClose }) {
-  const [trades, setTrades] = useState([]);
-  const [plans, setPlans] = useState([]);
-  const [plansError, setPlansError] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [formError, setFormError] = useState(null);
-  const [closeError, setCloseError] = useState(null);
-
-  const [draft, setDraft] = useState({
+function buildDraft(ticker, expirationDate, initialDraft = null) {
+  const base = {
     ticker: (ticker || "").toUpperCase(),
     strategyType: "",
     direction: "LONG",
@@ -242,7 +249,40 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     entryDate: defaultLocalDateTimeInput(),
     notes: "",
     sourcePlanId: "",
-  });
+    wheelStage: "",
+    lpRangeLower: "",
+    lpRangeUpper: "",
+    weeklyTargetYield: "",
+  };
+  if (!initialDraft) return base;
+  const nextExpiration = initialDraft.expirationDate ?? base.expirationDate;
+  return {
+    ...base,
+    ...initialDraft,
+    ticker: (initialDraft.ticker || base.ticker).toUpperCase(),
+    expirationDate: nextExpiration || "",
+    legs: defaultLegs(nextExpiration || ""),
+  };
+}
+
+function earliestIsoDate(values) {
+  const dates = values
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .sort();
+  return dates[0] || null;
+}
+
+export default function TradeJournalPanel({ userId, ticker, expirationDate, initialDraft, onClose }) {
+  const [trades, setTrades] = useState([]);
+  const [plans, setPlans] = useState([]);
+  const [plansError, setPlansError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [formError, setFormError] = useState(null);
+  const [closeError, setCloseError] = useState(null);
+
+  const [draft, setDraft] = useState(() => buildDraft(ticker, expirationDate, initialDraft));
   const [creating, setCreating] = useState(false);
 
   const [closingId, setClosingId] = useState(null);
@@ -320,6 +360,15 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
   // ticker change underneath the open overlay silently reverts their edit.
   const tickerDirty = useRef(false);
   const expirationDirty = useRef(false);
+  const initialDraftKey = useRef(initialDraft?.key || null);
+  useEffect(() => {
+    if (!initialDraft || initialDraftKey.current === initialDraft.key) return;
+    initialDraftKey.current = initialDraft.key;
+    tickerDirty.current = false;
+    expirationDirty.current = false;
+    setDraft(buildDraft(ticker, expirationDate, initialDraft));
+  }, [initialDraft, ticker, expirationDate]);
+
   useEffect(() => {
     if (!ticker || tickerDirty.current) return;
     setDraft((d) => ({
@@ -395,6 +444,9 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
         ? legExpirationDate
         : draft.expirationDate.trim() || null;
     const strikePrice = parsePositiveNumber(draft.strikePrice);
+    const lpRangeLower = parsePositiveNumber(draft.lpRangeLower);
+    const lpRangeUpper = parsePositiveNumber(draft.lpRangeUpper);
+    const weeklyTargetYield = parseNonNegativeNumber(draft.weeklyTargetYield);
     let legs = [];
     if (draft.optionType === "MULTI_LEG") {
       legs = draft.legs.map((leg) => ({
@@ -435,6 +487,12 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
       validation = "請完整填寫每腿的到期日、履約價、口數與價格";
     else if (entryPrice === null) validation = "進場價必須是大於 0 的數字";
     else if (positionSize === null) validation = "口數必須是大於 0 的整數";
+    else if (
+      lpRangeLower !== null &&
+      lpRangeUpper !== null &&
+      lpRangeLower >= lpRangeUpper
+    )
+      validation = "LP/CSP 區間下限必須低於上限";
     else if (draft.entryDate && new Date(draft.entryDate).getTime() > Date.now() + 60_000)
       validation = "進場時間不能設定在未來";
     if (validation) {
@@ -467,6 +525,10 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
             : null,
           notes: draft.notes.trim() || null,
           source_plan_id: draft.sourcePlanId || null,
+          wheel_stage: draft.wheelStage || null,
+          lp_range_lower: lpRangeLower,
+          lp_range_upper: lpRangeUpper,
+          weekly_target_yield: weeklyTargetYield,
           // expiration_date alone drives the entry GEX snapshot's DTE now —
           // the backend derives it, so the snapshot always matches the
           // expiration actually being recorded, even if the user edited it
@@ -479,22 +541,7 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
       // Fresh form — the prefill is welcome to take over the ticker again.
       tickerDirty.current = false;
       expirationDirty.current = false;
-      setDraft({
-        ticker: (ticker || "").toUpperCase(),
-        strategyType: "",
-        direction: "LONG",
-        creditDebit: "DEBIT",
-        expirationDate: expirationDate || "",
-        optionType: "CALL",
-        strikePrice: "",
-        contractSymbol: "",
-        legs: defaultLegs(expirationDate || ""),
-        entryPrice: "",
-        positionSize: "1",
-        entryDate: defaultLocalDateTimeInput(),
-        notes: "",
-        sourcePlanId: "",
-      });
+      setDraft(buildDraft(ticker, expirationDate));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -606,6 +653,12 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
     draft.optionType === "MULTI_LEG"
       ? legExpirationDate
       : draft.expirationDate.trim() || null;
+  const showIncomeFields =
+    /weekly_csp|defi_lp|cash[-\s]?secured|covered\s*call/i.test(draft.strategyType) ||
+    draft.wheelStage ||
+    draft.lpRangeLower ||
+    draft.lpRangeUpper ||
+    draft.weeklyTargetYield;
 
   // Live math for the close form: the same formula the backend uses for
   // pnl_pct, so the ×100 contract multiplier stops being invisible.
@@ -887,6 +940,43 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
               className={`w-16 bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[11.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
             />
           </div>
+          {showIncomeFields && (
+            <div className="grid grid-cols-4 gap-2">
+              <select
+                value={draft.wheelStage}
+                onChange={(e) => updateDraft({ wheelStage: e.target.value })}
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              >
+                <option value="">Wheel 階段</option>
+                {WHEEL_STAGES.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={draft.lpRangeLower}
+                onChange={(e) => updateDraft({ lpRangeLower: e.target.value })}
+                placeholder="區間下限"
+                inputMode="decimal"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+              <input
+                value={draft.lpRangeUpper}
+                onChange={(e) => updateDraft({ lpRangeUpper: e.target.value })}
+                placeholder="區間上限"
+                inputMode="decimal"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+              <input
+                value={draft.weeklyTargetYield}
+                onChange={(e) => updateDraft({ weeklyTargetYield: e.target.value })}
+                placeholder="週目標%"
+                inputMode="decimal"
+                className={`bg-[#0b0b0c] border border-[rgba(240,237,229,.09)] rounded px-2 py-1.5 text-[10.5px] text-[#f0ede5] outline-none focus:border-[#c9a15c] ${MONO}`}
+              />
+            </div>
+          )}
           <div className="flex flex-col gap-1">
             <span className="text-[9.5px] text-[#57575c]">進場時間（預設現在，可自行調整）</span>
             <input
@@ -994,6 +1084,13 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
                 <div className="text-[9.5px] text-[#57575c] mb-2">
                   {tradeExpirationSummary(t)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                 </div>
+                {(t.wheel_stage || t.lp_range_lower || t.lp_range_upper || t.weekly_target_yield) && (
+                  <div className="text-[9.5px] text-[#8d8d93] mb-2">
+                    Wheel {wheelStageLabel(t.wheel_stage)} · 區間{" "}
+                    {t.lp_range_lower ? fmtDollar(t.lp_range_lower) : "—"}–{t.lp_range_upper ? fmtDollar(t.lp_range_upper) : "—"} · 週目標{" "}
+                    {t.weekly_target_yield ?? "—"}%
+                  </div>
+                )}
                 {closingId === t.id ? (
                   <div className="flex flex-col gap-1.5">
                     <div className="flex gap-1.5">
@@ -1136,6 +1233,13 @@ export default function TradeJournalPanel({ userId, ticker, expirationDate, onCl
                   <div className="text-[9.5px] text-[#57575c] mb-2">
                     {tradeExpirationSummary(t)} · {contractSummary(t)} · 方向 {directionLabel(t.direction)} · 資流 {creditDebitLabel(t.credit_debit)}
                   </div>
+                  {(t.wheel_stage || t.lp_range_lower || t.lp_range_upper || t.weekly_target_yield) && (
+                    <div className="text-[9.5px] text-[#8d8d93] mb-2">
+                      Wheel {wheelStageLabel(t.wheel_stage)} · 區間{" "}
+                      {t.lp_range_lower ? fmtDollar(t.lp_range_lower) : "—"}–{t.lp_range_upper ? fmtDollar(t.lp_range_upper) : "—"} · 週目標{" "}
+                      {t.weekly_target_yield ?? "—"}%
+                    </div>
+                  )}
 
                   {review ? (
                     <div className="border-t border-[rgba(240,237,229,.09)] pt-2 mt-1 flex flex-col gap-1.5">

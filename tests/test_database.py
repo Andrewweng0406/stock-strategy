@@ -31,6 +31,7 @@ from app.models import (
     TradeCreate,
     TradeCreditDebit,
     TradeDirection,
+    TradeOptionType,
     TradeStatus,
     UserProfileUpdate,
     UserTradePlan,
@@ -427,6 +428,86 @@ async def test_trade_repository_create_persists_direction_and_credit_debit() -> 
 
 
 @pytest.mark.asyncio
+async def test_trade_repository_persists_weekly_csp_metadata() -> None:
+    repo = TradeRepository(await _session_factory())
+    trade = await repo.create_trade(
+        TradeCreate(
+            user_id="user-weekly-csp",
+            ticker="AAPL",
+            strategy_type="WEEKLY_CSP",
+            direction=TradeDirection.SHORT,
+            credit_debit=TradeCreditDebit.CREDIT,
+            expiration_date=date(2099, 8, 21),
+            option_type=TradeOptionType.PUT,
+            strike_price=220.0,
+            entry_price=1.35,
+            position_size=1,
+            lp_range_lower=215.0,
+            lp_range_upper=235.0,
+            weekly_target_yield=0.62,
+        ),
+        entry_gex_snapshot_id=None,
+    )
+
+    assert trade.wheel_stage == "CSP"
+    assert trade.lp_range_lower == 215.0
+    assert trade.lp_range_upper == 235.0
+    assert trade.weekly_target_yield == 0.62
+
+    fetched = await repo.get_trade(str(trade.id))
+    assert fetched is not None
+    assert fetched.strategy_type == "WEEKLY_CSP"
+    assert fetched.wheel_stage == "CSP"
+    assert fetched.lp_range_lower == 215.0
+
+
+def test_weekly_csp_requires_put_credit_and_ordered_range() -> None:
+    with pytest.raises(ValueError, match="PUT option_type"):
+        TradeCreate(
+            user_id="user-weekly-csp",
+            ticker="AAPL",
+            strategy_type="WEEKLY_CSP",
+            direction=TradeDirection.SHORT,
+            credit_debit=TradeCreditDebit.CREDIT,
+            expiration_date=date(2099, 8, 21),
+            option_type=TradeOptionType.CALL,
+            strike_price=220.0,
+            entry_price=1.35,
+            position_size=1,
+        )
+
+    with pytest.raises(ValueError, match="CREDIT trades"):
+        TradeCreate(
+            user_id="user-weekly-csp",
+            ticker="AAPL",
+            strategy_type="WEEKLY_CSP",
+            direction=TradeDirection.SHORT,
+            credit_debit=TradeCreditDebit.DEBIT,
+            expiration_date=date(2099, 8, 21),
+            option_type=TradeOptionType.PUT,
+            strike_price=220.0,
+            entry_price=1.35,
+            position_size=1,
+        )
+
+    with pytest.raises(ValueError, match="lp_range_lower"):
+        TradeCreate(
+            user_id="user-lp",
+            ticker="AAPL",
+            strategy_type="DEFI_LP",
+            direction=TradeDirection.NEUTRAL,
+            credit_debit=TradeCreditDebit.CREDIT,
+            expiration_date=date(2099, 8, 21),
+            option_type=TradeOptionType.CALL,
+            strike_price=220.0,
+            entry_price=1.0,
+            position_size=1,
+            lp_range_lower=230.0,
+            lp_range_upper=220.0,
+        )
+
+
+@pytest.mark.asyncio
 async def test_trade_repository_list_filters_by_ticker_and_status() -> None:
     repo = TradeRepository(await _session_factory())
     await repo.create_trade(
@@ -708,6 +789,10 @@ def test_migration_adds_trade_direction_columns_and_backfills_existing_rows() ->
         assert columns["strike_price"]["nullable"] is True
         assert columns["contract_symbol"]["nullable"] is True
         assert columns["legs_json"]["nullable"] is True
+        assert columns["wheel_stage"]["nullable"] is True
+        assert columns["lp_range_lower"]["nullable"] is True
+        assert columns["lp_range_upper"]["nullable"] is True
+        assert columns["weekly_target_yield"]["nullable"] is True
         rows = connection.exec_driver_sql(
             "SELECT id, direction, credit_debit, expiration_date FROM trades ORDER BY id"
         ).all()

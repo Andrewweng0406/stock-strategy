@@ -398,6 +398,91 @@ function Sparkline({ values, labels = [] }) {
   );
 }
 
+function WeeklyIncomePilot({
+  loading,
+  error,
+  csp,
+  lp,
+  expirationDate,
+  premiumCollected,
+  annualizedYield,
+  tradeCount,
+  onPrefill,
+}) {
+  const warnings = [...(csp?.warnings || []), ...(lp?.warnings || [])];
+  const canPrefill = Boolean(csp?.recommended_strike && expirationDate);
+  const stages = [
+    ["CSP", "賣 Put"],
+    ["ASSIGNED_STOCK", "接股"],
+    ["COVERED_CALL", "賣 Call"],
+    ["COMPLETED", "完成"],
+  ];
+  return (
+    <Card>
+      <CardTitle
+        title="Weekly CSP & LP Pilot"
+        tag={loading ? "Loading" : csp?.data_quality?.data_source || "—"}
+        tagTitle="以 gex_snapshots 的最後可信快照計算，不使用 synthetic fallback"
+      />
+      {error ? (
+        <div className="text-[10.5px] text-[#d8622b] leading-snug">{error}</div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="CSP Strike" value={fmtDollar(csp?.recommended_strike)} tone="bull" />
+            <Stat label="Win Prob" value={fmtPercent(csp?.estimated_win_probability, 1)} />
+            <Stat label="Put Wall" value={fmtDollar(csp?.put_wall)} tone="bear" />
+            <Stat label="MOS" value={fmtPercent(csp?.margin_of_safety_pct, 1)} />
+          </div>
+          <div className="rounded border border-[rgba(240,237,229,.09)] bg-[#0b0b0c] px-2.5 py-2">
+            <div className="text-[9.5px] text-[#57575c] mb-1.5 uppercase tracking-wide">
+              Wheel Stage
+            </div>
+            <div className="grid grid-cols-4 gap-1.5">
+              {stages.map(([value, label], index) => (
+                <div
+                  key={value}
+                  className={`h-8 rounded border flex items-center justify-center text-[9.5px] font-semibold ${
+                    index === 0
+                      ? "border-[rgba(201,161,92,.45)] text-[#c9a15c] bg-[rgba(201,161,92,.08)]"
+                      : "border-[rgba(240,237,229,.09)] text-[#57575c]"
+                  }`}
+                >
+                  {label}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="LP Lower" value={fmtDollar(lp?.range_lower)} />
+            <Stat label="LP Upper" value={fmtDollar(lp?.range_upper)} />
+            <Stat label="Weekly Premium" value={fmtDollar(premiumCollected)} tone={premiumCollected > 0 ? "bull" : ""} />
+            <Stat label="Annualized" value={annualizedYield === null ? "—" : fmtPercent(annualizedYield, 1)} />
+          </div>
+          <div className="text-[9.5px] text-[#57575c] leading-snug">
+            本週已記錄 {tradeCount} 筆 CSP；收益只統計 Trade Journal 真實紀錄。
+          </div>
+          {warnings.length > 0 && (
+            <div className="text-[9.5px] text-[#d8b06c] leading-snug">
+              {Array.from(new Set(warnings)).slice(0, 4).join(" · ")}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={onPrefill}
+            disabled={!canPrefill || loading}
+            title={!canPrefill ? "需要可信 GEX 快照與到期日才可帶入" : undefined}
+            className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-[#c9a15c] px-3 py-2 text-[10.5px] font-bold uppercase tracking-wide text-[#1a1408] hover:bg-[#d8b06c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Plus size={12} />
+            帶入 Trade Journal
+          </button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function TradingTerminalNotebook() {
   const [ticker, setTicker] = useState(DEFAULT_TICKER);
   const [tickerInput, setTickerInput] = useState(DEFAULT_TICKER);
@@ -445,6 +530,12 @@ export default function TradingTerminalNotebook() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
+  const [journalInitialDraft, setJournalInitialDraft] = useState(null);
+  const [cspRecommendation, setCspRecommendation] = useState(null);
+  const [lpRecommendation, setLpRecommendation] = useState(null);
+  const [weeklyTrades, setWeeklyTrades] = useState([]);
+  const [weeklyPilotLoading, setWeeklyPilotLoading] = useState(false);
+  const [weeklyPilotError, setWeeklyPilotError] = useState(null);
 
   const scrollRef = useRef(null);
   const isComposing = useRef(false);
@@ -616,6 +707,50 @@ export default function TradingTerminalNotebook() {
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, chatLoading]);
+
+  useEffect(() => {
+    if (expirationsTicker !== ticker) return;
+    let cancelled = false;
+    const recommendationDte = resolvedDte ?? selectedExpiration?.days_to_expiration ?? 7;
+    setWeeklyPilotLoading(true);
+    setWeeklyPilotError(null);
+    Promise.all([
+      fetch(apiUrl("/api/v1/strategies/csp-recommendation", { ticker, dte: recommendationDte }))
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await parseErrorDetail(res));
+          return res.json();
+        }),
+      fetch(apiUrl("/api/v1/strategies/lp-range", { ticker }))
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await parseErrorDetail(res));
+          return res.json();
+        }),
+      fetch(apiUrl("/api/v1/trades", { user_id: userId, ticker }))
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await parseErrorDetail(res));
+          return res.json();
+        }),
+    ])
+      .then(([csp, lp, trades]) => {
+        if (cancelled) return;
+        setCspRecommendation(csp);
+        setLpRecommendation(lp);
+        setWeeklyTrades(trades.trades || []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setCspRecommendation(null);
+        setLpRecommendation(null);
+        setWeeklyTrades([]);
+        setWeeklyPilotError(err.message || "無法載入 Weekly Pilot");
+      })
+      .finally(() => {
+        if (!cancelled) setWeeklyPilotLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker, userId, resolvedDte, selectedExpiration, expirationsTicker]);
 
   function commitTicker() {
     const next = tickerInput.trim().toUpperCase();
@@ -852,6 +987,36 @@ export default function TradingTerminalNotebook() {
     setSignError(null);
   }
 
+  function prefillWeeklyCspTrade() {
+    if (!cspRecommendation?.recommended_strike || !selectedExpiration?.date) return;
+    setJournalInitialDraft({
+      key: crypto.randomUUID(),
+      ticker,
+      strategyType: "WEEKLY_CSP",
+      direction: "LONG",
+      creditDebit: "CREDIT",
+      expirationDate: selectedExpiration.date,
+      optionType: "PUT",
+      strikePrice: String(cspRecommendation.recommended_strike),
+      entryPrice: "",
+      positionSize: "1",
+      wheelStage: "CSP",
+      lpRangeLower: lpRecommendation?.range_lower ? String(lpRecommendation.range_lower) : "",
+      lpRangeUpper: lpRecommendation?.range_upper ? String(lpRecommendation.range_upper) : "",
+      weeklyTargetYield: cspRecommendation.weekly_target_yield
+        ? String(cspRecommendation.weekly_target_yield)
+        : "",
+      notes: [
+        `Weekly CSP Pilot: Put Wall ${fmtDollar(cspRecommendation.put_wall)}`,
+        `Margin of Safety ${fmtPercent(cspRecommendation.margin_of_safety_pct, 1)}`,
+        `Estimated win ${fmtPercent(cspRecommendation.estimated_win_probability, 1)}`,
+      ].join(" · "),
+    });
+    setShowJournal(true);
+    setShowHistory(false);
+    setShowProfile(false);
+  }
+
   const netGexTone = gexData?.gex_status === "NEG_GAMMA" ? "bear" : "bull";
   const gexQuality = marketDataQuality(gexData);
   const gexHistoryChronological = [...gexHistory].reverse();
@@ -863,6 +1028,29 @@ export default function TradingTerminalNotebook() {
   const gexHistoryLabels = gexHistoryChronological.map((s) =>
     `${fmtDateTime(s.captured_at)}${s.is_stale ? " · stale" : ""}`
   );
+  const startOfWeek = new Date();
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  const weeklyCspTrades = weeklyTrades.filter((trade) => {
+    const strategy = String(trade.strategy_type || "").toUpperCase();
+    const entryDate = new Date(trade.entry_date);
+    return (
+      (strategy === "WEEKLY_CSP" || /CASH[-\s]?SECURED PUT/i.test(trade.strategy_type || "")) &&
+      trade.credit_debit === "CREDIT" &&
+      !Number.isNaN(entryDate.getTime()) &&
+      entryDate >= startOfWeek
+    );
+  });
+  const weeklyPremiumCollected = weeklyCspTrades.reduce(
+    (sum, trade) => sum + (Number(trade.entry_price) || 0) * 100 * (Number(trade.position_size) || 0),
+    0
+  );
+  const weeklyCollateral = weeklyCspTrades.reduce(
+    (sum, trade) => sum + (Number(trade.strike_price) || 0) * 100 * (Number(trade.position_size) || 0),
+    0
+  );
+  const weeklyApr =
+    weeklyCollateral > 0 ? (weeklyPremiumCollected / weeklyCollateral) * 52 * 100 : null;
 
   return (
     <div className={`h-screen flex flex-col bg-[#121214] text-[#f0ede5] ${MONO} text-[13px] overflow-hidden`}>
@@ -1054,6 +1242,18 @@ export default function TradingTerminalNotebook() {
                     </div>
                   )}
                 </Card>
+
+                <WeeklyIncomePilot
+                  loading={weeklyPilotLoading}
+                  error={weeklyPilotError}
+                  csp={cspRecommendation}
+                  lp={lpRecommendation}
+                  expirationDate={selectedExpiration?.date || null}
+                  premiumCollected={weeklyPremiumCollected}
+                  annualizedYield={weeklyApr}
+                  tradeCount={weeklyCspTrades.length}
+                  onPrefill={prefillWeeklyCspTrade}
+                />
               </>
             )}
           </div>
@@ -1155,6 +1355,7 @@ export default function TradingTerminalNotebook() {
               userId={userId}
               ticker={ticker}
               expirationDate={aggregateMode ? null : selectedExpiration?.date ?? null}
+              initialDraft={journalInitialDraft}
               onClose={() => setShowJournal(false)}
             />
           )}

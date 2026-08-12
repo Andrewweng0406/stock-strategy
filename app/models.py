@@ -260,6 +260,13 @@ class TradeOptionType(str, Enum):
     MULTI_LEG = "MULTI_LEG"
 
 
+class WheelStage(str, Enum):
+    CSP = "CSP"
+    ASSIGNED_STOCK = "ASSIGNED_STOCK"
+    COVERED_CALL = "COVERED_CALL"
+    COMPLETED = "COMPLETED"
+
+
 class TradeLegSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
@@ -298,9 +305,23 @@ class Trade(StrictModel):
     status: TradeStatus
     notes: str | None = Field(default=None, max_length=2000)
     entry_gex_snapshot_id: int | None = None
+    wheel_stage: WheelStage | None = None
+    lp_range_lower: float | None = Field(default=None, gt=0)
+    lp_range_upper: float | None = Field(default=None, gt=0)
+    weekly_target_yield: float | None = Field(default=None, ge=0)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+    @model_validator(mode="after")
+    def lp_range_is_ordered(self) -> "Trade":
+        if (
+            self.lp_range_lower is not None
+            and self.lp_range_upper is not None
+            and self.lp_range_lower >= self.lp_range_upper
+        ):
+            raise ValueError("lp_range_lower must be below lp_range_upper")
+        return self
 
 
 class TradeCreate(StrictModel):
@@ -319,6 +340,10 @@ class TradeCreate(StrictModel):
     entry_price: float = Field(gt=0)
     position_size: int = Field(gt=0)
     notes: str | None = Field(default=None, max_length=2000)
+    wheel_stage: WheelStage | None = None
+    lp_range_lower: float | None = Field(default=None, gt=0)
+    lp_range_upper: float | None = Field(default=None, gt=0)
+    weekly_target_yield: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def expiration_cannot_precede_entry(self) -> "TradeCreate":
@@ -353,6 +378,24 @@ class TradeCreate(StrictModel):
         for leg in self.legs:
             if leg.option_type == TradeOptionType.MULTI_LEG:
                 raise ValueError("leg option_type must be CALL or PUT")
+        return self
+
+    @model_validator(mode="after")
+    def income_strategy_metadata_is_consistent(self) -> "TradeCreate":
+        strategy = self.strategy_type.strip().upper()
+        if strategy == "WEEKLY_CSP":
+            if self.option_type != TradeOptionType.PUT:
+                raise ValueError("WEEKLY_CSP trades must use PUT option_type")
+            if self.credit_debit != TradeCreditDebit.CREDIT:
+                raise ValueError("WEEKLY_CSP trades must be CREDIT trades")
+            if self.wheel_stage is None:
+                self.wheel_stage = WheelStage.CSP
+        if (
+            self.lp_range_lower is not None
+            and self.lp_range_upper is not None
+            and self.lp_range_lower >= self.lp_range_upper
+        ):
+            raise ValueError("lp_range_lower must be below lp_range_upper")
         return self
 
 
@@ -414,6 +457,45 @@ class GEXSnapshot(StrictModel):
 class GEXSnapshotList(StrictModel):
     ticker: TickerSymbol
     snapshots: list[GEXSnapshot]
+
+
+class StrategyDataQuality(StrictModel):
+    data_source: MarketDataSource = MarketDataSource.UNKNOWN
+    is_delayed: bool = False
+    is_synthetic: bool = False
+    is_stale: bool = False
+    captured_at: datetime | None = None
+
+
+class CSPRecommendation(StrictModel):
+    ticker: TickerSymbol
+    dte: int = Field(ge=0, le=730)
+    spot_price: float | None = Field(default=None, gt=0)
+    put_wall: float | None = Field(default=None, gt=0)
+    zero_gamma: float | None = Field(default=None, gt=0)
+    call_wall: float | None = Field(default=None, gt=0)
+    recommended_strike: float | None = Field(default=None, gt=0)
+    margin_of_safety_pct: float | None = None
+    estimated_delta: float | None = Field(default=None, ge=0, le=1)
+    estimated_win_probability: float | None = Field(default=None, ge=0, le=100)
+    weekly_target_yield: float | None = Field(default=None, ge=0)
+    annualized_yield: float | None = Field(default=None, ge=0)
+    warnings: list[str] = Field(default_factory=list)
+    data_quality: StrategyDataQuality
+
+
+class LPRangeRecommendation(StrictModel):
+    ticker: TickerSymbol
+    spot_price: float | None = Field(default=None, gt=0)
+    range_lower: float | None = Field(default=None, gt=0)
+    range_upper: float | None = Field(default=None, gt=0)
+    zero_gamma: float | None = Field(default=None, gt=0)
+    put_wall: float | None = Field(default=None, gt=0)
+    call_wall: float | None = Field(default=None, gt=0)
+    range_width_pct: float | None = Field(default=None, ge=0)
+    breakout_bias: Literal["BULLISH", "BEARISH", "NEUTRAL", "UNKNOWN"] = "UNKNOWN"
+    warnings: list[str] = Field(default_factory=list)
+    data_quality: StrategyDataQuality
 
 
 RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]

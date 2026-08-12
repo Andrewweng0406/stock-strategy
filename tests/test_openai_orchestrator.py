@@ -19,6 +19,7 @@ from app.models import (
     TradeDirection,
     TradeOptionType,
     TradeStatus,
+    WheelStage,
     UserProfile,
 )
 from app.services.openai_orchestrator import LLMOrchestrator
@@ -218,6 +219,57 @@ def test_system_prompt_marks_stale_gex_context_as_not_live() -> None:
 
     assert context["gex_summary"]["is_stale"] is True
     assert "must not call them live/current" in prompt
+
+
+def test_review_prompt_embeds_weekly_csp_risk_context() -> None:
+    trade = Trade(
+        id=uuid4(),
+        user_id="user-1",
+        ticker="AAPL",
+        strategy_type="WEEKLY_CSP",
+        direction=TradeDirection.LONG,
+        credit_debit=TradeCreditDebit.CREDIT,
+        expiration_date=date(2026, 8, 21),
+        option_type=TradeOptionType.PUT,
+        strike_price=290.0,
+        entry_date=datetime(2026, 8, 14, 14, 30, tzinfo=timezone.utc),
+        entry_price=2.1,
+        exit_price=0.4,
+        position_size=1,
+        pnl=170.0,
+        pnl_pct=80.95,
+        status=TradeStatus.CLOSED,
+        wheel_stage=WheelStage.CSP,
+        lp_range_lower=285.0,
+        lp_range_upper=330.0,
+        weekly_target_yield=0.72,
+    )
+    snapshot = GEXSnapshot(
+        ticker="AAPL",
+        days_to_expiration=7,
+        captured_at=datetime.now(timezone.utc),
+        underlying_price=311.0,
+        zero_gamma_strike=305.0,
+        call_wall_strike=330.0,
+        put_wall_strike=300.0,
+        net_gex=1_000_000.0,
+        iv_rank=45.0,
+        gex_status=GEXStatus.POS_GAMMA,
+        data_source=MarketDataSource.MOOMOO,
+    )
+
+    prompt = LLMOrchestrator(None, "test-model")._review_instructions(
+        trade, snapshot, execution_score=4, has_source_plan=False
+    )
+    context_json = prompt.split("<context>", 1)[1].split("</context>", 1)[0]
+    context = json.loads(context_json)
+
+    assert context["weekly_income_context"]["wheel_stage"] == "CSP"
+    assert context["weekly_income_context"]["put_wall"] == 300.0
+    assert context["weekly_income_context"]["strike_below_or_at_put_wall"] is True
+    assert context["weekly_income_context"]["collateral_required_usd"] == 29000.0
+    assert context["weekly_income_context"]["earnings_event_status"] == "UNKNOWN"
+    assert "review it as a wheel income trade" in prompt
 
 
 def test_system_prompt_requires_mechanical_dealer_hedging_scenario_not_intent() -> None:

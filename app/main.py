@@ -53,10 +53,12 @@ from app.models import (
     ConversationList,
     ConversationMessages,
     CloudSyncHealth,
+    CSPRecommendation,
     ExpirationInfo,
     ExpirationList,
     GEXSnapshotList,
     HealthResponse,
+    LPRangeRecommendation,
     OptionGEXSummary,
     PlanList,
     SavePlanRequest,
@@ -77,6 +79,7 @@ from app.services import (
     CloudSync,
     GEXService,
     LLMOrchestrator,
+    WeeklyIncomeStrategyService,
     compute_execution_score,
     plan_levels_are_usable,
 )
@@ -104,6 +107,7 @@ class AppServices:
     snapshot_repository: GEXSnapshotRepository
     trade_repository: TradeRepository
     trade_review_repository: TradeReviewRepository
+    weekly_income_strategy: WeeklyIncomeStrategyService
     llm: LLMOrchestrator
 
 
@@ -171,6 +175,7 @@ async def lifespan(app: FastAPI):
     summary_cache_repository = GEXSummaryCacheRepository(session_factory)
     trade_repository = TradeRepository(session_factory)
     trade_review_repository = TradeReviewRepository(session_factory)
+    weekly_income_strategy = WeeklyIncomeStrategyService(snapshot_repository)
     gex_service = GEXService(
         market_data,
         cache,
@@ -194,6 +199,7 @@ async def lifespan(app: FastAPI):
         snapshot_repository=snapshot_repository,
         trade_repository=trade_repository,
         trade_review_repository=trade_review_repository,
+        weekly_income_strategy=weekly_income_strategy,
         llm=LLMOrchestrator(
             openai_client,
             settings.openai_model,
@@ -370,6 +376,23 @@ async def get_gex_history(
 ) -> GEXSnapshotList:
     snapshots = await services.snapshot_repository.list_snapshots(ticker, limit)
     return GEXSnapshotList(ticker=ticker.strip().upper(), snapshots=snapshots)
+
+
+@app.get("/api/v1/strategies/csp-recommendation", response_model=CSPRecommendation)
+async def get_csp_recommendation(
+    services: Services,
+    ticker: str = Query(..., min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
+    dte: int = Query(default=7, ge=0, le=730),
+) -> CSPRecommendation:
+    return await services.weekly_income_strategy.csp_recommendation(ticker, dte)
+
+
+@app.get("/api/v1/strategies/lp-range", response_model=LPRangeRecommendation)
+async def get_lp_range(
+    services: Services,
+    ticker: str = Query(..., min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$"),
+) -> LPRangeRecommendation:
+    return await services.weekly_income_strategy.lp_range(ticker)
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)

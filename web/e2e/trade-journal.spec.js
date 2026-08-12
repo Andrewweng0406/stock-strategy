@@ -106,6 +106,53 @@ async function installApiStub(
       await json({ trades });
       return;
     }
+    if (url.pathname === "/api/v1/strategies/csp-recommendation") {
+      await json({
+        ticker: url.searchParams.get("ticker") || "AAPL",
+        dte: Number(url.searchParams.get("dte") || 7),
+        spot_price: 230.5,
+        put_wall: 215,
+        zero_gamma: 225,
+        call_wall: 240,
+        recommended_strike: 210,
+        margin_of_safety_pct: 8.9,
+        estimated_delta: 0.22,
+        estimated_win_probability: 78,
+        weekly_target_yield: 0.48,
+        annualized_yield: 24.96,
+        warnings: ["EARNINGS_WINDOW_UNKNOWN"],
+        data_quality: {
+          data_source: "MOOMOO",
+          is_delayed: false,
+          is_synthetic: false,
+          is_stale: false,
+          captured_at: "2026-08-10T12:00:00Z",
+        },
+      });
+      return;
+    }
+    if (url.pathname === "/api/v1/strategies/lp-range") {
+      await json({
+        ticker: url.searchParams.get("ticker") || "AAPL",
+        spot_price: 230.5,
+        range_lower: 215,
+        range_upper: 240,
+        zero_gamma: 225,
+        put_wall: 215,
+        call_wall: 240,
+        range_width_pct: 10.85,
+        breakout_bias: "NEUTRAL",
+        warnings: [],
+        data_quality: {
+          data_source: "MOOMOO",
+          is_delayed: false,
+          is_synthetic: false,
+          is_stale: false,
+          captured_at: "2026-08-10T12:00:00Z",
+        },
+      });
+      return;
+    }
     if (url.pathname === "/api/v1/trades" && request.method() === "POST") {
       const payload = request.postDataJSON();
       onCreateTrade(payload);
@@ -136,6 +183,10 @@ async function installApiStub(
         status: "OPEN",
         notes: payload.notes,
         entry_gex_snapshot_id: 10,
+        wheel_stage: payload.wheel_stage,
+        lp_range_lower: payload.lp_range_lower,
+        lp_range_upper: payload.lp_range_upper,
+        weekly_target_yield: payload.weekly_target_yield,
         created_at: "2026-08-10T12:00:00Z",
       };
       trades.unshift(trade);
@@ -216,6 +267,36 @@ test("trade journal records and displays option expiration for a new single-leg 
   await expect(card).toContainText("到期 8/21");
   await expect(card).toContainText("$450 Call");
   await expect(card).not.toContainText("到期 —");
+});
+
+test("weekly CSP pilot prefills trade journal with strike, expiration, and wheel metadata", async ({ page }) => {
+  const createdPayloads = [];
+  await installApiStub(page, { onCreateTrade: (payload) => createdPayloads.push(payload) });
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Weekly CSP & LP Pilot")).toBeVisible();
+  await page.getByRole("button", { name: "帶入 Trade Journal" }).click();
+
+  await expect(page.getByPlaceholder("策略類型（可挑選或自行輸入）")).toHaveValue("WEEKLY_CSP");
+  await expect(page.locator('input[type="date"]').first()).toHaveValue("2026-08-21");
+  await expect(page.getByPlaceholder("履約價")).toHaveValue("210");
+  await expect(page.getByPlaceholder("區間下限")).toHaveValue("215");
+  await expect(page.getByPlaceholder("區間上限")).toHaveValue("240");
+  await expect(page.getByPlaceholder("週目標%")).toHaveValue("0.48");
+
+  await page.getByPlaceholder("進場價").fill("1.25");
+  await page.getByRole("button", { name: /新增交易/ }).click();
+  await expect.poll(() => createdPayloads.length).toBe(1);
+  expect(createdPayloads[0]).toMatchObject({
+    strategy_type: "WEEKLY_CSP",
+    credit_debit: "CREDIT",
+    option_type: "PUT",
+    strike_price: 210,
+    wheel_stage: "CSP",
+    lp_range_lower: 215,
+    lp_range_upper: 240,
+    weekly_target_yield: 0.48,
+  });
 });
 
 test("legacy trades without expiration are explicitly marked instead of looking valid", async ({ page }) => {

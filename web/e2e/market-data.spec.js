@@ -117,6 +117,55 @@ async function installTerminalStub(
       await fulfillJson(route, { trades: [] });
       return;
     }
+    if (url.pathname === "/api/v1/strategies/csp-recommendation") {
+      const ticker = url.searchParams.get("ticker") || "AAPL";
+      await fulfillJson(route, {
+        ticker,
+        dte: Number(url.searchParams.get("dte") || 7),
+        spot_price: 230.5,
+        put_wall: 215,
+        zero_gamma: 225,
+        call_wall: 240,
+        recommended_strike: 210,
+        margin_of_safety_pct: 8.9,
+        estimated_delta: 0.22,
+        estimated_win_probability: 78,
+        weekly_target_yield: 0.48,
+        annualized_yield: 24.96,
+        warnings: ["EARNINGS_WINDOW_UNKNOWN"],
+        data_quality: {
+          data_source: "MOOMOO",
+          is_delayed: false,
+          is_synthetic: false,
+          is_stale: false,
+          captured_at: "2026-08-10T12:00:00Z",
+        },
+      });
+      return;
+    }
+    if (url.pathname === "/api/v1/strategies/lp-range") {
+      const ticker = url.searchParams.get("ticker") || "AAPL";
+      await fulfillJson(route, {
+        ticker,
+        spot_price: 230.5,
+        range_lower: 215,
+        range_upper: 240,
+        zero_gamma: 225,
+        put_wall: 215,
+        call_wall: 240,
+        range_width_pct: 10.85,
+        breakout_bias: "NEUTRAL",
+        warnings: [],
+        data_quality: {
+          data_source: "MOOMOO",
+          is_delayed: false,
+          is_synthetic: false,
+          is_stale: false,
+          captured_at: "2026-08-10T12:00:00Z",
+        },
+      });
+      return;
+    }
     if (url.pathname.startsWith("/api/v1/profile/")) {
       await fulfillJson(route, {
         user_id: url.pathname.split("/").pop(),

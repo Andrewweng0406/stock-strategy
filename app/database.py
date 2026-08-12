@@ -763,6 +763,10 @@ class TradeRecord(Base):
     status: Mapped[str] = mapped_column(String(16), index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     entry_gex_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wheel_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lp_range_lower: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lp_range_upper: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weekly_target_yield: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -813,6 +817,26 @@ def ensure_trade_metadata_columns(connection) -> None:
     if "legs_json" not in columns:
         connection.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN legs_json TEXT"
+        )
+        added_column = True
+    if "wheel_stage" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN wheel_stage VARCHAR(32)"
+        )
+        added_column = True
+    if "lp_range_lower" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN lp_range_lower FLOAT"
+        )
+        added_column = True
+    if "lp_range_upper" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN lp_range_upper FLOAT"
+        )
+        added_column = True
+    if "weekly_target_yield" not in columns:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN weekly_target_yield FLOAT"
         )
         added_column = True
     if not added_column:
@@ -957,6 +981,10 @@ class TradeRepository:
             status=TradeStatus.OPEN.value,
             notes=create.notes,
             entry_gex_snapshot_id=entry_gex_snapshot_id,
+            wheel_stage=create.wheel_stage.value if create.wheel_stage else None,
+            lp_range_lower=create.lp_range_lower,
+            lp_range_upper=create.lp_range_upper,
+            weekly_target_yield=create.weekly_target_yield,
             created_at=now,
         )
         async with self.session_factory() as session:
@@ -1061,6 +1089,10 @@ class TradeRepository:
             status=TradeStatus(record.status),
             notes=record.notes,
             entry_gex_snapshot_id=record.entry_gex_snapshot_id,
+            wheel_stage=record.wheel_stage,
+            lp_range_lower=record.lp_range_lower,
+            lp_range_upper=record.lp_range_upper,
+            weekly_target_yield=record.weekly_target_yield,
             created_at=_as_utc(record.created_at),
         )
 

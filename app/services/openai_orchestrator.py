@@ -554,6 +554,39 @@ precise, probability-aware advice from the authoritative market context below.
             entry_gex_context["is_delayed"] = entry_snapshot.is_delayed
             entry_gex_context["is_synthetic"] = entry_snapshot.is_synthetic
             entry_gex_context["is_stale"] = entry_snapshot.is_stale
+        weekly_income_context: dict[str, Any] | None = None
+        if trade.strategy_type.strip().upper() == "WEEKLY_CSP":
+            spot = entry_snapshot.underlying_price if entry_snapshot else None
+            put_wall = entry_snapshot.put_wall_strike if entry_snapshot else None
+            strike = trade.strike_price
+            collateral_required = (
+                strike * 100 * trade.position_size if strike is not None else None
+            )
+            margin_from_spot_pct = (
+                round((spot - strike) / spot * 100, 2)
+                if spot and strike
+                else None
+            )
+            strike_vs_put_wall_pct = (
+                round((strike - put_wall) / spot * 100, 2)
+                if spot and strike and put_wall
+                else None
+            )
+            weekly_income_context = {
+                "wheel_stage": trade.wheel_stage.value if trade.wheel_stage else None,
+                "weekly_target_yield": trade.weekly_target_yield,
+                "lp_range_lower": trade.lp_range_lower,
+                "lp_range_upper": trade.lp_range_upper,
+                "put_wall": put_wall,
+                "strike_below_or_at_put_wall": (
+                    strike <= put_wall if strike is not None and put_wall is not None else None
+                ),
+                "margin_from_spot_pct": margin_from_spot_pct,
+                "strike_vs_put_wall_pct": strike_vs_put_wall_pct,
+                "collateral_required_usd": collateral_required,
+                "collateral_usage_pct": None,
+                "earnings_event_status": "UNKNOWN",
+            }
         context = json.dumps(
             {
                 "ticker": trade.ticker,
@@ -576,6 +609,7 @@ precise, probability-aware advice from the authoritative market context below.
                 "execution_score": execution_score,
                 "has_source_plan": has_source_plan,
                 "entry_gex_context": entry_gex_context,
+                "weekly_income_context": weekly_income_context,
             },
             ensure_ascii=True,
         )
@@ -603,6 +637,11 @@ trade. Give a direct, honest post-trade diagnosis.
 4. ai_feedback must be concise, direct, and at most 600 characters.
 5. key_takeaways must be 1 to 5 short, concrete, actionable bullets — no
    vague platitudes like "manage risk better."
+6. For WEEKLY_CSP, review it as a wheel income trade: judge whether the sold
+   put strike had enough distance below spot and Put Wall, whether collateral
+   assignment risk was acceptable, whether the weekly yield compensated the
+   risk, and say earnings_event_status is UNKNOWN when no earnings calendar is
+   present. Do not invent account equity or earnings dates.
 </behavior_rules>
 """.strip()
 
